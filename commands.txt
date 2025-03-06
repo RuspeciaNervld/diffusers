@@ -1,0 +1,40 @@
+python examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_catvton_base.py \
+  --use_openpose_conditioning \
+  --use_canny_conditioning \
+  --latent_append_num 3 \
+  --canny_conditioning_type 2 \
+  --condition_image_drop_out 0.1 \
+  --validation_steps 50 \
+  --save_steps 50 \
+  --validation_prompt "" \
+  --dream_lambda 50 \
+  --validation_image "/home/nervld/gitclone/diffusers/data/catvton/real_images/00391_00.jpg" \
+  --validation_condition_image "/home/nervld/gitclone/diffusers/data/catvton/condition_images/00391_00.jpg" \
+  --validation_canny_image "/home/nervld/gitclone/diffusers/data/catvton/canny_images_2/00391_00.jpg" \
+  --validation_mask "/home/nervld/gitclone/diffusers/data/catvton/real_masks/00391_00.jpg" \
+  --pretrained_model_name_or_path="booksforcharlie/stable-diffusion-inpainting" \
+  --instance_data_dir="/home/nervld/gitclone/diffusers/data/catvton" \
+  --output_dir="/home/nervld/gitclone/diffusers/output" \
+  --instance_prompt="" \
+  --resolution=512 \
+  --train_batch_size=1 \
+  --gradient_accumulation_steps=4 \
+  --learning_rate=1e-7 \
+  --max_train_steps=16000 \
+  --gradient_checkpointing \
+  --mixed_precision="bf16" \
+  --trainable_modules "attention" \
+  --catvton_attn_path="/home/nervld/gitclone/diffusers/models/catvton_unet_attn" \
+  --resume_from_checkpoint "/home/nervld/gitclone/diffusers/output/0305_01:16/step-20"\
+  --use_warp_cloth \
+  --cloth_warp_drop_out 0.8 \
+  --valid_cloth_warp_image "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_images/00391_00.jpg" \
+  --valid_cloth_warp_mask "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_masks/00391_00.jpg" \
+  --use_8bit_adam \
+
+
+最佳训练的超参数应该是学习率1e-5，batch size 128，16,000 steps，使用AdamW优化器，DREAM λ=10，分辨率512x384。
+
+
+
+tensorboard --logdir /home/nervld/gitclone/diffusers/output/0305_14:30/logs

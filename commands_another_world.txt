@@ -1,0 +1,27 @@
+python examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_catvton_base.py \
+  --validation_steps 50 \
+  --save_steps 100 \
+  --validation_prompt "" \
+  --dream_lambda 10 \
+  --validation_image "/root/autodl-tmp/data/real_images/00000_00.jpg" \
+  --validation_condition_image "/root/autodl-tmp/data/condition_images/00000_00.jpg" \
+  --validation_mask "/root/autodl-tmp/data/real_masks/00000_00.jpg" \
+  --valid_cloth_warp_image "/root/autodl-tmp/data/cloth_warp_images/00000_00.jpg" \
+  --valid_cloth_warp_mask "/root/autodl-tmp/data/cloth_warp_masks/00000_00.jpg" \
+  --pretrained_model_name_or_path "runwayml/stable-diffusion-inpainting" \
+  --instance_data_dir "/root/autodl-tmp/data" \
+  --output_dir "/root/autodl-tmp/output" \
+  --instance_prompt "" \
+  --resolution 512 \
+  --train_batch_size 1 \
+  --gradient_accumulation_steps 128 \
+  --learning_rate 1e-5 \
+  --max_train_steps 16000 \
+  --gradient_checkpointing \
+  --mixed_precision "bf16" \
+  --trainable_modules "attention" \
+  --use_warp_cloth \
+  --catvton_attn_path "/root/diffusers/models/catvton_unet_attn" \
+  --resume_from_checkpoint "/root/autodl-tmp/output/0301_23:29/step-400" \
+  --use_openpose_conditioning \
+  --openpose_conditioning_image_dir "/root/autodl-tmp/data/openpose_images"
