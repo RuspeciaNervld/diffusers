@@ -17,13 +17,13 @@ CONFIG = {
     # 模型和路径配置
     "pretrained_model_path": "booksforcharlie/stable-diffusion-inpainting",
     "catvton_attn_path": "/home/nervld/gitclone/diffusers/models/catvton_unet_attn",
-    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_unet_attn/with openpose/202503060030",
-    "output_dir": "/home/nervld/gitclone/diffusers/output/inference_results_openpose_700",
-    "latent_append_num": 2,
+    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_unet_attn/with warp/202503060032",
+    "output_dir": "/home/nervld/gitclone/diffusers/output/inference_results_warp_800",
+    "latent_append_num": 1,
     
     # 条件控制配置
-    "use_warp_cloth": False,
-    "use_openpose_conditioning": True,
+    "use_warp_cloth": True,
+    "use_openpose_conditioning": False,
     "use_canny_conditioning": False,
     # "canny_conditioning_type": 1,
 
