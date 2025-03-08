@@ -1,0 +1,38 @@
+python examples/research_projects/dreambooth_inpaint/train_dreambooth_inpaint_catvton_base.py \
+  --use_openpose_conditioning \
+  --use_canny_conditioning --canny_conditioning_type 1 \
+  --latent_append_num 3 \
+  --condition_image_drop_out 0.2 \
+  --validation_steps 50 \
+  --save_steps 50 \
+  --dream_lambda 50 \
+  --validation_image "/mnt/pub_data/vton/real_images/00391_00.jpg" \
+  --validation_condition_image "/mnt/pub_data/vton/condition_images/00391_00.jpg" \
+  --validation_canny_image "/mnt/pub_data/vton/canny_images_2/00391_00.jpg" \
+  --validation_mask "/mnt/pub_data/vton/real_masks/00391_00.jpg" \
+  --pretrained_model_name_or_path="/mnt/pub_data/booksforcharlie-stable-diffusion-inpainting" \
+  --instance_data_dir="/mnt/pub_data/vton" \
+  --output_dir="/mnt/pub_data/train_output" \
+  --resolution=512 \
+  --train_batch_size=4 \
+  --gradient_accumulation_steps=8 \
+  --learning_rate=1e-6 \
+  --max_train_steps=16000 \
+  --gradient_checkpointing \
+  --mixed_precision="bf16" \
+  --trainable_modules "attention" \
+  --catvton_attn_path="/mnt/pub_data/catvton_unet_attn" \
+  --color_loss_weight 0.5 --color_loss_type lpips --color_loss_interval 100 \
+  --resume_from_checkpoint "/mnt/storage/train_output/0306_01:16/step-20"\
+  --use_warp_cloth \
+  --cloth_warp_drop_out 0.8 \
+  --valid_cloth_warp_image "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_images/00391_00.jpg" \
+  --valid_cloth_warp_mask "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_masks/00391_00.jpg" \
+  --use_8bit_adam \
+
+
+最佳训练的超参数应该是学习率1e-5，batch size 128，16,000 steps，使用AdamW优化器，DREAM λ=10，分辨率512x384。
+
+
+
+tensorboard --logdir /mnt/pub_data/train_output/0307_10:22/logs --port 9999

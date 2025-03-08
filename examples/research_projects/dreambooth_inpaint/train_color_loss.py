@@ -20,9 +20,11 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-from catvton_base_infer import run_inference
+from catvton_base_infer import run_inference_2
 import json
 from unet_adapter import adapt_unet_with_catvton_attn
+import lpips
+from torchvision.transforms.functional import to_tensor
 
 from diffusers import (
     AutoencoderKL,
@@ -46,6 +48,7 @@ def collate_fn(examples):
     # 收集所有图像数据
     real_images = torch.stack([example["real_images"] for example in examples])
     real_masks = torch.stack([example["real_masks"] for example in examples])
+    condition_images = torch.stack([example["condition_images"] for example in examples])
     # 判断是否存在对应的Key
     if "cloth_warp_images" in examples[0]:
         cloth_warp_images = torch.stack([example["cloth_warp_images"] for example in examples])
@@ -53,39 +56,41 @@ def collate_fn(examples):
     else:
         cloth_warp_images = None
         cloth_warp_masks = None
-    if "condition_images" in examples[0]:
-        condition_images = torch.stack([example["condition_images"] for example in examples])
+    
+    if "extra_cond1_images" in examples[0]:
+        extra_cond1_images = torch.stack([example["extra_cond1_images"] for example in examples])
     else:
-        condition_images = None
-    if "openpose_images" in examples[0]:
-        openpose_images = torch.stack([example["openpose_images"] for example in examples])
+        extra_cond1_images = None
+    if "extra_cond2_images" in examples[0]:
+        extra_cond2_images = torch.stack([example["extra_cond2_images"] for example in examples])
     else:
-        openpose_images = None
-    if "canny_images" in examples[0]:
-        canny_images = torch.stack([example["canny_images"] for example in examples])
+        extra_cond2_images = None
+    if "extra_cond3_images" in examples[0]:
+        extra_cond3_images = torch.stack([example["extra_cond3_images"] for example in examples])
     else:
-        canny_images = None
+        extra_cond3_images = None
     # 确保数据格式正确
     real_images = real_images.to(memory_format=torch.contiguous_format).float()
     real_masks = real_masks.to(memory_format=torch.contiguous_format).float()
-    if cloth_warp_images is not None:
-        cloth_warp_images = cloth_warp_images.to(memory_format=torch.contiguous_format).float()
-        cloth_warp_masks = cloth_warp_masks.to(memory_format=torch.contiguous_format).float()
-    if condition_images is not None:
-        condition_images = condition_images.to(memory_format=torch.contiguous_format).float()
-    if openpose_images is not None:
-        openpose_images = openpose_images.to(memory_format=torch.contiguous_format).float()
-    if canny_images is not None:
-        canny_images = canny_images.to(memory_format=torch.contiguous_format).float()
+    condition_images = condition_images.to(memory_format=torch.contiguous_format).float()
+    cloth_warp_images = cloth_warp_images.to(memory_format=torch.contiguous_format).float()
+    cloth_warp_masks = cloth_warp_masks.to(memory_format=torch.contiguous_format).float()
+    if extra_cond1_images is not None:
+        extra_cond1_images = extra_cond1_images.to(memory_format=torch.contiguous_format).float()
+    if extra_cond2_images is not None:
+        extra_cond2_images = extra_cond2_images.to(memory_format=torch.contiguous_format).float()
+    if extra_cond3_images is not None:
+        extra_cond3_images = extra_cond3_images.to(memory_format=torch.contiguous_format).float()
 
     batch = {
         "real_images": real_images,
         "real_masks": real_masks,
+        "condition_images": condition_images,
         "cloth_warp_images": cloth_warp_images,
         "cloth_warp_masks": cloth_warp_masks,
-        "condition_images": condition_images,
-        "openpose_images": openpose_images,
-        "canny_images": canny_images,
+        "extra_cond1_images": extra_cond1_images,
+        "extra_cond2_images": extra_cond2_images,
+        "extra_cond3_images": extra_cond3_images,
     }
 
 
@@ -290,47 +295,10 @@ def parse_args():
         help="运行验证的步数间隔。如果设置，将每隔指定步数生成测试图片。",
     )
     parser.add_argument(
-        "--validation_prompt",
+        "--validation_root_dir",
         type=str,
         default=None,
-        help="用于验证的提示词。",
-    )
-    parser.add_argument(
-        "--validation_image",
-        type=str,
-        default=None,
-        help="用于验证的输入图片路径。",
-    )
-    parser.add_argument(
-        "--validation_mask",
-        type=str,
-        default=None,
-        help="用于验证的mask图片路径。",
-    )
-    parser.add_argument(
-        "--validation_condition_image",
-        type=str,
-        default=None,
-        help="用于验证的条件图片路径。",
-    )
-    parser.add_argument(
-        "--validation_canny_image",
-        type=str,
-        default=None,
-        help="用于验证的canny图片路径。",
-    )
-
-    parser.add_argument(
-        "--valid_cloth_warp_image",
-        type=str,
-        default=None,
-        help="用于验证的变形服装图片路径。",
-    )
-    parser.add_argument(
-        "--valid_cloth_warp_mask",
-        type=str,
-        default=None,
-        help="用于验证的变形服装掩码路径。",
+        help="验证集根目录，包含real_images, condition_images, densepose_images, canny_images, real_masks",
     )
     parser.add_argument(
         "--random_transform",
@@ -355,11 +323,7 @@ def parse_args():
         default="attention",
         help="要训练的模块，多个模块用分号分隔",
     )
-    parser.add_argument(
-        "--use_openpose_conditioning",
-        action="store_true",
-        help="是否使用openpose条件控制",
-    )
+
     parser.add_argument(
         "--use_warp_cloth",
         action="store_true",
@@ -383,26 +347,49 @@ def parse_args():
         default=0.0,
         help="不使用cloth warp的概率",
     )
-
+    # 添加颜色损失参数
     parser.add_argument(
-        "--use_canny_conditioning",
+        "--color_loss_weight",
+        type=float,
+        default=0.5,
+        help="Color loss的权重系数"
+    )
+    parser.add_argument(
+        "--color_loss_type",
+        type=str,
+        default="lpips",
+        choices=["lpips", "mse"],
+        help="颜色损失类型：lpips或mse"
+    )
+    parser.add_argument(
+        "--color_loss_interval",
+        type=int,
+        default=100,
+        help="每多少步计算一次颜色损失"
+    )
+    parser.add_argument(
+        "--extra_cond1",
+        type=str,
+        default=None,
+        help="额外条件1"
+    )
+    parser.add_argument(
+        "--extra_cond2",
+        type=str,
+        default=None,
+        help="额外条件2"
+    )
+    parser.add_argument(
+        "--extra_cond3",
+        type=str,
+        default=None,
+        help="额外条件3"
+    )
+    parser.add_argument(
+        "--use_warp_as_condition",
         action="store_true",
-        help="是否使用canny conditioning",
+        help="是否使用warp作为条件"
     )
-    parser.add_argument(
-        "--canny_conditioning_type",
-        type=int,
-        default=1,
-        help="canny conditioning的类型",
-    )
-
-    parser.add_argument(
-        "--latent_append_num",
-        type=int,
-        default=1,
-        help="使用的latent数量：1=CatVTON, 2=CatVTON+Openpose, 3=CatVTON+Canny+Openpose",
-    )
-
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -440,65 +427,52 @@ class DreamBoothDataset(Dataset):
         size=512,
         center_crop=False,
         random_transform=False,
-        canny_conditioning_type=1,
-        use_canny_conditioning=False,
-        use_openpose_conditioning=False,
-        use_warp_cloth=False,
+        extra_cond1=None,
+        extra_cond2=None,
+        extra_cond3=None,
     ):
         self.size = size
         self.center_crop = center_crop
         self.random_transform = random_transform
         self.tokenizer = tokenizer
-        self.use_warp_cloth = use_warp_cloth
-        self.use_openpose_conditioning = use_openpose_conditioning
-        self.use_canny_conditioning = use_canny_conditioning
-        self.canny_conditioning_type = canny_conditioning_type
 
         # 获取所有图片路径
         self.real_images_path = sorted(Path(os.path.join(instance_data_root, "real_images")).iterdir())
         self.real_masks_path = sorted(Path(os.path.join(instance_data_root, "real_masks")).iterdir())
-        if use_warp_cloth:
-            self.cloth_warp_images_path = sorted(Path(os.path.join(instance_data_root, "cloth_warp_images")).iterdir())
-            self.cloth_warp_masks_path = sorted(Path(os.path.join(instance_data_root, "cloth_warp_masks")).iterdir())
-        else:
-            self.cloth_warp_masks_path = None
-            self.cloth_warp_images_path = None
-        if use_openpose_conditioning:
-            self.openpose_images_path = sorted(Path(os.path.join(instance_data_root, "densepose_images")).iterdir())
-        else:
-            self.openpose_images_path = None
-
         self.condition_images_path = sorted(Path(os.path.join(instance_data_root, "condition_images")).iterdir())
+        self.cloth_warp_images_path = sorted(Path(os.path.join(instance_data_root, "cloth_warp_images")).iterdir())
+        self.cloth_warp_masks_path = sorted(Path(os.path.join(instance_data_root, "cloth_warp_masks")).iterdir())
 
-        
-        canny_dir = "canny_images_2" if canny_conditioning_type == 2 else "canny_images"
-        if use_canny_conditioning:
-            self.canny_images_path = sorted(Path(os.path.join(instance_data_root, canny_dir)).iterdir())
+        if extra_cond1 is not None:
+            self.extra_cond1_images_path = sorted(Path(os.path.join(instance_data_root, extra_cond1)).iterdir())
         else:
-            self.canny_images_path = None
+            self.extra_cond1_images_path = None
 
-        check_list = [
-            self.real_images_path,
-            self.real_masks_path,
-            self.condition_images_path,
-        ]
-
-        if use_warp_cloth:
-            check_list.append(self.cloth_warp_masks_path)
-            check_list.append(self.cloth_warp_images_path)
-        if use_openpose_conditioning:
-            check_list.append(self.openpose_images_path)
-        if use_canny_conditioning:
-            check_list.append(self.canny_images_path)
+        if extra_cond2 is not None:
+            self.extra_cond2_images_path = sorted(Path(os.path.join(instance_data_root, extra_cond2)).iterdir())
+        else:
+            self.extra_cond2_images_path = None
+        
+        if extra_cond3 is not None:
+            self.extra_cond3_images_path = sorted(Path(os.path.join(instance_data_root, extra_cond3)).iterdir())
+        else:
+            self.extra_cond3_images_path = None
             
+        # 输出每个文件夹中的图片数量
+        print(f"real_images_path: {len(self.real_images_path)}")
+        print(f"real_masks_path: {len(self.real_masks_path)}")
+        print(f"condition_images_path: {len(self.condition_images_path)}")
+        print(f"cloth_warp_images_path: {len(self.cloth_warp_images_path)}")
+        print(f"cloth_warp_masks_path: {len(self.cloth_warp_masks_path)}")
+        if self.extra_cond1_images_path is not None:
+            print(f"extra_cond1_images_path: {len(self.extra_cond1_images_path)}")
+        if self.extra_cond2_images_path is not None:
+            print(f"extra_cond2_images_path: {len(self.extra_cond2_images_path)}")
+        if self.extra_cond3_images_path is not None:
+            print(f"extra_cond3_images_path: {len(self.extra_cond3_images_path)}")
 
-        
-        # 确保所有文件夹中的图片数量相同
-        num_images = len(self.real_images_path)
-        assert all(len(x) == num_images for x in check_list), "所有文件夹中的图片数量必须相同"
-        
-        self.num_images = num_images
-        self.instance_prompt = instance_prompt
+        self.num_images = len(self.real_images_path)
+
 
     def __len__(self):
         return self.num_images
@@ -509,23 +483,23 @@ class DreamBoothDataset(Dataset):
         # 加载所有图像
         real_image = Image.open(self.real_images_path[index])
         real_mask = Image.open(self.real_masks_path[index])
-        if self.use_warp_cloth:
-            cloth_warp_image = Image.open(self.cloth_warp_images_path[index])
-            cloth_warp_mask = Image.open(self.cloth_warp_masks_path[index])
-        else:
-            cloth_warp_image = None
-            cloth_warp_mask = None
-
         condition_image = Image.open(self.condition_images_path[index])
+        cloth_warp_image = Image.open(self.cloth_warp_images_path[index])
+        cloth_warp_mask = Image.open(self.cloth_warp_masks_path[index])
 
-        if self.use_openpose_conditioning:
-            openpose_image = Image.open(self.openpose_images_path[index])
+        if self.extra_cond1_images_path is not None:
+            extra_cond1_image = Image.open(self.extra_cond1_images_path[index])
         else:
-            openpose_image = None
-        if self.use_canny_conditioning:
-            canny_image = Image.open(self.canny_images_path[index])
+            extra_cond1_image = None
+        if self.extra_cond2_images_path is not None:
+            extra_cond2_image = Image.open(self.extra_cond2_images_path[index])
         else:
-            canny_image = None
+            extra_cond2_image = None
+        if self.extra_cond3_images_path is not None:
+            extra_cond3_image = Image.open(self.extra_cond3_images_path[index])
+        else:
+            extra_cond3_image = None
+
         # 转换图像模式
         if not real_mask.mode == "L":
             real_mask = real_mask.convert("L")
@@ -535,10 +509,12 @@ class DreamBoothDataset(Dataset):
             cloth_warp_mask = cloth_warp_mask.convert("L")
         if condition_image is not None and not condition_image.mode == "RGB":
             condition_image = condition_image.convert("RGB")
-        if openpose_image is not None and not openpose_image.mode == "RGB":
-            openpose_image = openpose_image.convert("RGB")
-        if canny_image is not None and not canny_image.mode == "RGB":
-            canny_image = canny_image.convert("RGB")
+        if extra_cond1_image is not None and not extra_cond1_image.mode == "RGB":
+            extra_cond1_image = extra_cond1_image.convert("RGB")
+        if extra_cond2_image is not None and not extra_cond2_image.mode == "RGB":
+            extra_cond2_image = extra_cond2_image.convert("RGB")
+        if extra_cond3_image is not None and not extra_cond3_image.mode == "RGB":
+            extra_cond3_image = extra_cond3_image.convert("RGB")
         
         # 转换为tensor并规范化
         example["real_images"] = transforms.ToTensor()(real_image)
@@ -554,29 +530,15 @@ class DreamBoothDataset(Dataset):
         if condition_image is not None:
             example["condition_images"] = transforms.ToTensor()(condition_image)
 
-        if openpose_image is not None:
-            example["openpose_images"] = transforms.ToTensor()(openpose_image)
+        if extra_cond1_image is not None:
+            example["extra_cond1_images"] = transforms.ToTensor()(extra_cond1_image)
 
-        if canny_image is not None:
-            example["canny_images"] = transforms.ToTensor()(canny_image)
+        if extra_cond2_image is not None:
+            example["extra_cond2_images"] = transforms.ToTensor()(extra_cond2_image)
 
-        return example
+        if extra_cond3_image is not None:
+            example["extra_cond3_images"] = transforms.ToTensor()(extra_cond3_image)
 
-
-class PromptDataset(Dataset):
-    """A simple dataset to prepare the prompts to generate class images on multiple GPUs."""
-
-    def __init__(self, prompt, num_samples):
-        self.prompt = prompt
-        self.num_samples = num_samples
-
-    def __len__(self):
-        return self.num_samples
-
-    def __getitem__(self, index):
-        example = {}
-        example["prompt"] = self.prompt
-        example["index"] = index
         return example
 
 
@@ -623,8 +585,9 @@ def save_model(args, global_step, unet, accelerator, is_final=False):
         "use_warp_cloth": args.use_warp_cloth,
         "condition_image_drop_out": args.condition_image_drop_out,
         "cloth_warp_drop_out": args.cloth_warp_drop_out,
-        "canny_conditioning_type": args.canny_conditioning_type,
-        "latent_append_num": args.latent_append_num,
+        "extra_cond1": args.extra_cond1,
+        "extra_cond2": args.extra_cond2,
+        "extra_cond3": args.extra_cond3,
     }
     import json
     with open(os.path.join(save_path, "training_config.json"), "w") as f:
@@ -742,6 +705,14 @@ def main():
         project_config=project_config,
     )
 
+    # 在初始化accelerator之后添加
+    if args.color_loss_type == "lpips":
+        lpips_model = lpips.LPIPS(net='vgg').to(accelerator.device)
+        lpips_model.requires_grad_(False)
+        lpips_model.eval()
+    else:
+        lpips_model = None
+
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
     # TODO (patil-suraj): Remove this check when gradient accumulation with two models is enabled in accelerate.
@@ -834,21 +805,18 @@ def main():
 
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
+        instance_prompt="",
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
         random_transform=args.random_transform,
-        use_warp_cloth=args.use_warp_cloth,
-        use_openpose_conditioning=args.use_openpose_conditioning,
-        use_canny_conditioning=args.use_canny_conditioning,
-        canny_conditioning_type=args.canny_conditioning_type,
+        extra_cond1=args.extra_cond1,
+        extra_cond2=args.extra_cond2,
+        extra_cond3=args.extra_cond3,
     )
 
-
-
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn
+        train_dataset, batch_size=args.train_batch_size, shuffle=False, collate_fn=collate_fn
     )
 
     # Scheduler and math around the number of training steps.
@@ -982,45 +950,36 @@ def main():
     progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
 
-    # 在开始训练循环之前添加验证pipeline的初始化
-    if args.validation_steps is not None and accelerator.is_main_process:
-        if None in [args.validation_prompt, args.validation_image, args.validation_mask]:
-            print("验证参数不完整，将跳过验证步骤。需要同时提供 validation_prompt, validation_image 和 validation_mask。")
-            args.validation_steps = None
-        else:
-            validation_pipeline = StableDiffusionInpaintPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
-                torch_dtype=weight_dtype,
-                safety_checker=None,
-            )
-            validation_pipeline.scheduler = DDPMScheduler.from_config(validation_pipeline.scheduler.config)
-            validation_pipeline.to(accelerator.device)
-            
-            # 加载验证用的图片和mask
-            from PIL import Image
-            init_image = Image.open(args.validation_image).convert("RGB")
-            mask_image = Image.open(args.validation_mask).convert("L")
-            init_image = init_image.resize((args.resolution, args.resolution))
-            mask_image = mask_image.resize((args.resolution, args.resolution))
-
     # 在开始训练前进行测试生成
+    # 验证图片名称列表
+    validation_image_names = os.listdir(os.path.join(args.validation_root_dir, "real_images"))
+    validation_image_length = len(validation_image_names)
     if accelerator.is_main_process:
         print("正在进行预训练测试...")
-
+        random_index = random.randint(0, validation_image_length - 1)
         # 加载验证图片
-        validation_image = Image.open(args.validation_image).convert("RGB")
-        validation_mask = Image.open(args.validation_mask).convert("L")
-        validation_condition_image = Image.open(args.validation_condition_image).convert("RGB")
-        validation_canny_image = Image.open(args.validation_canny_image).convert("RGB")
-        # 加载cloth_warp相关的图片
+        validation_image = Image.open(os.path.join(args.validation_root_dir, "real_images", validation_image_names[random_index])).convert("RGB")
+        validation_mask = Image.open(os.path.join(args.validation_root_dir, "real_masks", validation_image_names[random_index])).convert("L")
+        validation_condition_image = Image.open(os.path.join(args.validation_root_dir, "condition_images", validation_image_names[random_index])).convert("RGB")
+        
+        validation_extra_cond1_image = None
+        validation_extra_cond2_image = None
+        validation_extra_cond3_image = None
+        if "extra_cond1" in args and args.extra_cond1 is not None:
+            validation_extra_cond1_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond1_images", validation_image_names[random_index])).convert("RGB")
+        if "extra_cond2" in args and args.extra_cond2 is not None:
+            validation_extra_cond2_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond2_images", validation_image_names[random_index])).convert("RGB")
+        if "extra_cond3" in args and args.extra_cond3 is not None:
+            validation_extra_cond3_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond3_images", validation_image_names[random_index])).convert("RGB")
+
         validation_cloth_warp_image = None
         validation_cloth_warp_mask = None
-        if args.valid_cloth_warp_image is not None and args.valid_cloth_warp_mask is not None:
-            validation_cloth_warp_image = Image.open(args.valid_cloth_warp_image).convert("RGB")
-            validation_cloth_warp_mask = Image.open(args.valid_cloth_warp_mask).convert("L")
+        if args.use_warp_cloth:
+            validation_cloth_warp_image = Image.open(os.path.join(args.validation_root_dir, "cloth_warp_images", validation_image_names[random_index])).convert("RGB")
+            validation_cloth_warp_mask = Image.open(os.path.join(args.validation_root_dir, "cloth_warp_masks", validation_image_names[random_index])).convert("L")
 
         # 运行推理
-        result = run_inference(
+        result = run_inference_2(
             unet=accelerator.unwrap_model(unet),
             vae=vae,
             noise_scheduler=noise_scheduler,
@@ -1031,7 +990,10 @@ def main():
             condition_image=validation_condition_image,
             cloth_warp_image=validation_cloth_warp_image,
             cloth_warp_mask=validation_cloth_warp_mask,
-            canny_image=validation_canny_image,
+            use_warp_as_condition=args.use_warp_as_condition,
+            extra_cond1=validation_extra_cond1_image,
+            extra_cond2=validation_extra_cond2_image,
+            extra_cond3=validation_extra_cond3_image,
         )[0]
         
         # 保存推理结果
@@ -1103,32 +1065,36 @@ def main():
                 # 编码masked_part
                 masked_part_latents = vae.encode(masked_part.to(dtype=weight_dtype)).latent_dist.sample()
                 masked_part_latents = masked_part_latents * vae.config.scaling_factor
+                # 编码masked_real_images
+                masked_real_images_latents = vae.encode(masked_real_images.to(dtype=weight_dtype)).latent_dist.sample()
+                masked_real_images_latents = masked_real_images_latents * vae.config.scaling_factor
 
                 # 根据latent_append_num决定拼接方式
-                latents_to_concat = [real_image_latents, condition_image_latents]
-                masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
-                                  torch.zeros_like(mask_latent)]
-                masked_latents_to_concat = [masked_part_latents, condition_image_latents]
+                if args.use_warp_as_condition:
+                    latents_to_concat = [masked_real_images_latents, condition_image_latents, masked_part_latents]
+                    masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
+                                    torch.zeros_like(mask_latent),
+                                    torch.zeros_like(mask_latent)]
+                    masked_latents_to_concat = [masked_real_images_latents, condition_image_latents, masked_part_latents]
+                else:
+                    latents_to_concat = [real_image_latents, condition_image_latents]
+                    masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
+                                    torch.zeros_like(mask_latent)]
+                    masked_latents_to_concat = [masked_part_latents, condition_image_latents]
 
-                # 如果需要openpose (latent_append_num >= 2)
-                if args.use_openpose_conditioning:
-                    openpose_images = batch["openpose_images"].to(dtype=weight_dtype)
-                    openpose_latents = vae.encode(openpose_images).latent_dist.sample()
-                    openpose_latents = openpose_latents * vae.config.scaling_factor
-                    
-                    latents_to_concat.append(openpose_latents)
-                    masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(openpose_latents)
 
-                # 如果需要canny (latent_append_num >= 3)
-                if args.use_canny_conditioning:
-                    canny_images = batch["canny_images"].to(dtype=weight_dtype)
-                    canny_latents = vae.encode(canny_images).latent_dist.sample()
-                    canny_latents = canny_latents * vae.config.scaling_factor
-                    
-                    latents_to_concat.append(canny_latents)
+                if "extra_cond1" in args and args.extra_cond1 is not None:
+                    latents_to_concat.append(vae.encode(batch["extra_cond1_images"]).latent_dist.sample())
                     masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(canny_latents)
+                    masked_latents_to_concat.append(vae.encode(batch["extra_cond1_images"]).latent_dist.sample())
+                if "extra_cond2" in args and args.extra_cond2 is not None:
+                    latents_to_concat.append(vae.encode(batch["extra_cond2_images"]).latent_dist.sample())
+                    masks_to_concat.append(torch.zeros_like(mask_latent))
+                    masked_latents_to_concat.append(vae.encode(batch["extra_cond2_images"]).latent_dist.sample())
+                if "extra_cond3" in args and args.extra_cond3 is not None:
+                    latents_to_concat.append(vae.encode(batch["extra_cond3_images"]).latent_dist.sample())
+                    masks_to_concat.append(torch.zeros_like(mask_latent))
+                    masked_latents_to_concat.append(vae.encode(batch["extra_cond3_images"]).latent_dist.sample())
 
                 # 拼接所有latents
                 latent_model_input_p1 = torch.cat(latents_to_concat, dim=-2)
@@ -1150,38 +1116,75 @@ def main():
                 # 预测噪声残差
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=None).sample
 
+                # === 新增：生成RGB图像用于颜色损失计算 ===
+                with torch.no_grad():
+                    # 显存优化
+                    with torch.autocast(accelerator.device.type):
+                        # 解码生成图像（使用真实潜变量，非噪声版本）
+                        generated_rgb = vae.decode(
+                            latent_model_input_p1 / vae.config.scaling_factor,
+                            return_dict=False
+                        )[0].clamp(-1, 1)
+                        generated_rgb = (generated_rgb + 1) / 2  # 归一化到[0,1]
+                        # 在-2维度进行剪裁为512x512
+                        generated_rgb = generated_rgb[:, :, :512, :384]
+                
+                # 计算颜色损失（每隔指定步数计算）
+                color_loss = 0
+                if global_step % args.color_loss_interval == 0:
+                    # 获取真实图像和掩膜
+                    real_rgb = real_images_batch.to(weight_dtype)  # [0,1]范围
+                    mask = real_masks_batch  # 1表示保留区域，0表示掩膜
+                    
+                    if args.color_loss_type == "lpips":
+                        # 使用LPIPS计算感知损失（仅在可见区域）
+                        # print(f"生成图像的shape: {generated_rgb.shape}")
+                        # print(f"真实图像的shape: {real_rgb.shape}")
+                        # print(f"可见区域的shape: {visible_mask.shape}")
+                        color_loss = lpips_model(
+                            generated_rgb * mask,
+                            real_rgb * mask
+                        ).mean()
+                    else:
+                        # 使用MSE计算像素级差异
+                        color_loss = F.mse_loss(
+                            generated_rgb * mask,
+                            real_rgb * mask
+                        )
+                    
+                    print(f"颜色损失: {color_loss}")
+
                 # 计算DREAM损失
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                     # 确保mask_latent的维度与noise_pred匹配
                     dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
                     # 根据实际的latent_append_num扩展dream_weights
-                    num_appends = 1  # 基础CatVTON
-                    if args.use_openpose_conditioning:
-                        num_appends += 1
-                    if args.use_canny_conditioning:
-                        num_appends += 1
-                        
+                    num_appends = 1+ (args.use_warp_as_condition) + (args.extra_cond1 is not None) + (args.extra_cond2 is not None) + (args.extra_cond3 is not None)
+                    # print(f"num_appends: {num_appends}")
                     #! 注意这里先尝试一下全0，看看效果
                     # 扩展dream_weights
                     dream_weights = torch.cat([dream_weights] + [torch.zeros_like(dream_weights)] * num_appends, dim=-2)
                     
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     loss = (loss * dream_weights).mean()
+                    #! 新增：添加颜色损失
+                    total_loss = loss + color_loss * args.color_loss_weight
                 else:
                     # v_prediction的情况类似
                     target = noise_scheduler.get_velocity(latent_model_input_p1, noise, timesteps)
                     dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
-                    num_appends = 1 + args.use_openpose_conditioning + args.use_canny_conditioning
                     dream_weights = torch.cat([dream_weights] + [torch.zeros_like(dream_weights)] * num_appends, dim=-2)
                     loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                     loss = (loss * dream_weights).mean()
+                    #! 新增：添加颜色损失
+                    total_loss = loss + color_loss * args.color_loss_weight
 
                 # 在反向传播前检查损失是否有梯度
                 if not loss.requires_grad:
                     raise ValueError("损失没有梯度！请检查模型参数是否正确解冻。")
 
-                accelerator.backward(loss)
+                accelerator.backward(total_loss)
                 
                 # 添加梯度检查
                 if accelerator.sync_gradients:
@@ -1206,23 +1209,35 @@ def main():
                 # 添加验证步骤
                 if args.validation_steps is not None and global_step % args.validation_steps == 0 and accelerator.is_main_process:
                     print("正在生成验证图片...")
+                    random_index = np.random.randint(0, len(validation_image_names))
+                    print(f"生成的图片的原路径是：\n{os.path.join(args.validation_root_dir, 'real_images', validation_image_names[random_index])}")
                     output_path = os.path.join(args.output_dir, f"validation_step_{global_step}.png")
                     
                     # 加载验证图片
-                    validation_image = Image.open(args.validation_image).convert("RGB")
-                    validation_mask = Image.open(args.validation_mask).convert("L")
-                    validation_condition_image = Image.open(args.validation_condition_image).convert("RGB")
+                    validation_image = Image.open(os.path.join(args.validation_root_dir, "real_images", validation_image_names[random_index])).convert("RGB")
+                    validation_mask = Image.open(os.path.join(args.validation_root_dir, "real_masks", validation_image_names[random_index])).convert("L")
+                    validation_condition_image = Image.open(os.path.join(args.validation_root_dir, "condition_images", validation_image_names[random_index])).convert("RGB")
                     
                     # 加载cloth_warp相关的图片
                     validation_cloth_warp_image = None
                     validation_cloth_warp_mask = None
-                    if args.valid_cloth_warp_image is not None and args.valid_cloth_warp_mask is not None:
-                        validation_cloth_warp_image = Image.open(args.valid_cloth_warp_image).convert("RGB")
-                        validation_cloth_warp_mask = Image.open(args.valid_cloth_warp_mask).convert("L")
+                    if args.use_warp_cloth:
+                        validation_cloth_warp_image = Image.open(os.path.join(args.validation_root_dir, "cloth_warp_images", validation_image_names[random_index])).convert("RGB")
+                        validation_cloth_warp_mask = Image.open(os.path.join(args.validation_root_dir, "cloth_warp_masks", validation_image_names[random_index])).convert("L")
+
+                    validation_extra_cond1_image = None
+                    validation_extra_cond2_image = None
+                    validation_extra_cond3_image = None
+                    if "extra_cond1" in args and args.extra_cond1 is not None:
+                        validation_extra_cond1_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond1_images", validation_image_names[random_index])).convert("RGB")
+                    if "extra_cond2" in args and args.extra_cond2 is not None:
+                        validation_extra_cond2_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond2_images", validation_image_names[random_index])).convert("RGB")
+                    if "extra_cond3" in args and args.extra_cond3 is not None:
+                        validation_extra_cond3_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond3_images", validation_image_names[random_index])).convert("RGB")
 
                     # 生成验证图片
                     with torch.autocast(accelerator.device.type):
-                        result = run_inference(
+                        result = run_inference_2(
                             unet=accelerator.unwrap_model(unet),
                             vae=vae,
                             noise_scheduler=noise_scheduler,
@@ -1233,6 +1248,10 @@ def main():
                             condition_image=validation_condition_image,
                             cloth_warp_image=validation_cloth_warp_image,
                             cloth_warp_mask=validation_cloth_warp_mask,
+                            use_warp_as_condition=args.use_warp_as_condition,
+                            extra_cond1=validation_extra_cond1_image,
+                            extra_cond2=validation_extra_cond2_image,
+                            extra_cond3=validation_extra_cond3_image,
                         )[0]
 
                     # 保存验证图片
@@ -1244,7 +1263,7 @@ def main():
                     if args.train_text_encoder:
                         text_encoder.train()
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"dream_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
