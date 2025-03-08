@@ -9,28 +9,29 @@ import torchvision.transforms as transforms
 import json
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from catvton_base_infer import run_inference
-from train_dreambooth_inpaint_catvton_base import DreamBoothDataset, collate_fn, adapt_unet_with_catvton_attn
+from catvton_base_infer import run_inference_2
+from train_color_loss import DreamBoothDataset, collate_fn, adapt_unet_with_catvton_attn
 
 # 全局配置
 CONFIG = {
     # 模型和路径配置
+    "test_data_root" :"/home/nervld/gitclone/diffusers/data/vton_test_small",
     "pretrained_model_path": "booksforcharlie/stable-diffusion-inpainting",
     "catvton_attn_path": "/home/nervld/gitclone/diffusers/models/catvton_unet_attn",
-    "my_unet_attn_path": None,
-    #"/home/nervld/gitclone/diffusers/models/my_unet_attn/with warp/catvton_unet_attn",
-    "output_dir": "/home/nervld/gitclone/diffusers/output/inference_results_catvton",
-    "latent_append_num": 1,
+    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_unet_attn/with warp/nolpips6000_dream50_batch2_lr1e-5", # 有的话会覆盖catvton_attn_path
+    "output_dir": "/home/nervld/gitclone/diffusers/output/vton_test_small/nolpips6000_dream50_batch2_lr1e-5",
     
     # 条件控制配置
     "use_warp_cloth": True,
-    "use_openpose_conditioning": False,
-    "use_canny_conditioning": False,
-    # "canny_conditioning_type": 1,
+    "use_warp_as_condition": False,
+    "extra_cond1": "/home/nervld/gitclone/diffusers/data/vton_test_small/detail_images",
+    "extra_cond2": None,
+    "extra_cond3": None,
+
 
     # 训练相关配置
     "resolution": 512,
-    "batch_size": 1,
+    "batch_size": 4,
     "device": "cuda",
     "mixed_precision": "bf16",  # 修改为 "no" 以避免 bitsandbytes 问题
     "trainable_modules": "attention",
@@ -106,16 +107,12 @@ def run_inference_on_test_dataset(test_data_root):
         print(f"加载MyUnet attention权重: {CONFIG['my_unet_attn_path']}")
         load_trainable_params(unet, CONFIG["my_unet_attn_path"])
     else:
-        print(f"未加载CatVTON attention权重，也未指定MyUnet attention权重路径")
+        print(f"未指定MyUnet attention权重路径")
 
     # 移动模型到设备
     vae.to(CONFIG["device"], dtype=weight_dtype)
     unet.to(CONFIG["device"], dtype=weight_dtype)
 
-    # 如果有canny_conditioning_type，则
-    canny_conditioning_type = 1
-    if CONFIG["use_canny_conditioning"]:
-        canny_conditioning_type = CONFIG["canny_conditioning_type"]
 
     # 创建测试数据集
     test_dataset = DreamBoothDataset(
@@ -125,10 +122,9 @@ def run_inference_on_test_dataset(test_data_root):
         size=CONFIG["resolution"],
         center_crop=True,
         random_transform=False,
-        canny_conditioning_type=canny_conditioning_type,
-        use_warp_cloth=CONFIG["use_warp_cloth"],
-        use_openpose_conditioning=CONFIG["use_openpose_conditioning"],
-        use_canny_conditioning=CONFIG["use_canny_conditioning"],
+        extra_cond1=CONFIG["extra_cond1"],
+        extra_cond2=CONFIG["extra_cond2"],
+        extra_cond3=CONFIG["extra_cond3"],
     )
 
     # 创建数据加载器
@@ -159,72 +155,49 @@ def run_inference_on_test_dataset(test_data_root):
             # 将数据移到正确的设备和类型
             real_images = batch["real_images"].to(CONFIG["device"], dtype=weight_dtype)
             real_masks = batch["real_masks"].to(CONFIG["device"], dtype=weight_dtype)
-            if "condition_images" in batch and batch["condition_images"] is not None:
-                condition_images = batch["condition_images"].to(CONFIG["device"], dtype=weight_dtype)
-            else:
-                condition_images = None
-            if "cloth_warp_images" in batch and batch["cloth_warp_images"] is not None:
+            condition_images = batch["condition_images"].to(CONFIG["device"], dtype=weight_dtype)
+            if CONFIG["use_warp_cloth"]:
                 cloth_warp_images = batch["cloth_warp_images"].to(CONFIG["device"], dtype=weight_dtype)
                 cloth_warp_masks = batch["cloth_warp_masks"].to(CONFIG["device"], dtype=weight_dtype)
             else:
                 cloth_warp_images = None
                 cloth_warp_masks = None
-            if "openpose_images" in batch and batch["openpose_images"] is not None:
-                openpose_images = batch["openpose_images"].to(CONFIG["device"], dtype=weight_dtype)
+            if CONFIG["extra_cond1"] is not None:
+                extra_cond1 = batch["extra_cond1_images"].to(CONFIG["device"], dtype=weight_dtype)
             else:
-                openpose_images = None
-            if "canny_images" in batch and batch["canny_images"] is not None:
-                canny_images = batch["canny_images"].to(CONFIG["device"], dtype=weight_dtype)
+                extra_cond1 = None
+            if CONFIG["extra_cond2"] is not None:
+                extra_cond2 = batch["extra_cond2_images"].to(CONFIG["device"], dtype=weight_dtype)
             else:
-                canny_images = None
+                extra_cond2 = None
+            if CONFIG["extra_cond3"] is not None:
+                extra_cond3 = batch["extra_cond3_images"].to(CONFIG["device"], dtype=weight_dtype)
+            else:
+                extra_cond3 = None
 
-            # 对每个样本进行处理
-            for i in range(len(real_images)):
-                # 准备单个样本的输入
-                image = transforms.ToPILImage()(real_images[i].cpu())
-                mask = transforms.ToPILImage()(real_masks[i].cpu())
-                condition_image = None
-                if condition_images is not None:
-                    condition_image = transforms.ToPILImage()(condition_images[i].cpu())
-                
-                # 准备cloth_warp相关的输入
-                cloth_warp_image = None
-                cloth_warp_mask = None
-                if cloth_warp_images is not None:
-                    cloth_warp_image = transforms.ToPILImage()(cloth_warp_images[i].cpu())
-                    cloth_warp_mask = transforms.ToPILImage()(cloth_warp_masks[i].cpu())
+            # 运行推理
+            result = run_inference_2(
+                unet=unet,
+                vae=vae,
+                noise_scheduler=noise_scheduler,
+                device=CONFIG["device"],
+                weight_dtype=weight_dtype,
+                image=real_images,
+                mask=real_masks,
+                condition_image=condition_images,
+                cloth_warp_image=cloth_warp_images,
+                cloth_warp_mask=cloth_warp_masks,
+                extra_cond1=extra_cond1,
+                extra_cond2=extra_cond2,
+                extra_cond3=extra_cond3,
+                use_warp_as_condition=CONFIG["use_warp_as_condition"],
+            )
 
-                # 准备openpose输入
-                openpose_image = None
-                if openpose_images is not None:
-                    openpose_image = transforms.ToPILImage()(openpose_images[i].cpu())
-
-                # 准备canny输入
-                canny_image = None
-                if canny_images is not None:
-                    canny_image = transforms.ToPILImage()(canny_images[i].cpu())
-
-                # 运行推理
-                result = run_inference(
-                    unet=unet,
-                    vae=vae,
-                    noise_scheduler=noise_scheduler,
-                    device=CONFIG["device"],
-                    weight_dtype=weight_dtype,
-                    image=image,
-                    mask=mask,
-                    condition_image=condition_image,
-                    cloth_warp_image=cloth_warp_image,
-                    cloth_warp_mask=cloth_warp_mask,
-                    openpose_image=openpose_image,
-                    canny_image=canny_image,
-                    latent_append_num=CONFIG["latent_append_num"],
-                )[0]
-
+            for i in range(len(result)):
                 # 保存结果，应该按照命名顺序按照原来real_images的文件名保存
                 idxx = batch_idx * CONFIG["batch_size"] + i
                 save_path = os.path.join(CONFIG["output_dir"], f"{real_images_file_names[idxx]}")
-                result.save(save_path)
+                result[i].save(save_path)
 
     # 计算并打印处理时间
     total_time = time.time() - start_time
@@ -240,5 +213,5 @@ def run_inference_on_test_dataset(test_data_root):
 
 if __name__ == "__main__":
     # 只需要提供测试数据集路径
-    test_data_root = "/home/nervld/gitclone/diffusers/data/vton_test"  # 替换为实际的测试数据集路径
+    test_data_root = CONFIG["test_data_root"]  # 替换为实际的测试数据集路径
     run_inference_on_test_dataset(test_data_root)
