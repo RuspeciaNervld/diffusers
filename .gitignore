@@ -181,3 +181,5 @@ data
 dataset_visualization
 models
 lpips_results.txt
+calculate_metrics/PerceptualSimilarity
+calculate_metrics/PerceptualSimilarity/
