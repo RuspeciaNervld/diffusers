@@ -25,6 +25,9 @@ import json
 from unet_adapter import adapt_unet_with_catvton_attn
 import lpips
 from torchvision.transforms.functional import to_tensor
+from skimage.metrics import structural_similarity as ssim
+from skimage.metrics import mean_squared_error as mse
+from skimage.color import rgb2lab
 
 from diffusers import (
     AutoencoderKL,
@@ -43,6 +46,24 @@ check_min_version("0.13.0.dev0")
 
 logger = get_logger(__name__)
 
+def canny_edge_detector(images):
+    # 转换为灰度图（假设输入为RGB）
+    gray_images = 0.299 * images[:,0] + 0.587 * images[:,1] + 0.114 * images[:,2]
+    gray_images = gray_images.unsqueeze(1)  # [B,1,H,W]
+
+    # 高斯滤波（保持与原始代码一致）
+    kernel = torch.tensor([[1,2,1],[2,4,2],[1,2,1]], dtype=torch.bfloat16, device=images.device)
+    kernel = kernel.view(1,1,3,3) / 16.0
+    blurred = F.conv2d(gray_images, kernel, padding=1)  # 单通道无需groups参数
+    
+    # Sobel梯度计算（单通道输入）
+    sobel_x = F.conv2d(blurred, torch.tensor([[-1,0,1],[-2,0,2],[-1,0,1]], dtype=torch.bfloat16, device=images.device).view(1,1,3,3))
+    sobel_y = F.conv2d(blurred, torch.tensor([[-1,-2,-1],[0,0,0],[1,2,1]], dtype=torch.bfloat16, device=images.device).view(1,1,3,3))
+    grad_mag = torch.sqrt(sobel_x**2 + sobel_y**2)
+    
+    # 后续步骤不变
+    edge_map = (grad_mag > 0.3).float()
+    return edge_map
 
 def collate_fn(examples):
     # 收集所有图像数据
@@ -348,24 +369,19 @@ def parse_args():
         help="不使用cloth warp的概率",
     )
     # 添加颜色损失参数
+
     parser.add_argument(
-        "--color_loss_weight",
-        type=float,
-        default=0.5,
-        help="Color loss的权重系数"
-    )
-    parser.add_argument(
-        "--color_loss_type",
+        "--other_loss_type",
         type=str,
         default="lpips",
-        choices=["lpips", "mse"],
+        choices=["lpips", "mse", "ssim", "canny"],
         help="颜色损失类型：lpips或mse"
     )
     parser.add_argument(
-        "--color_loss_interval",
-        type=int,
-        default=100,
-        help="每多少步计算一次颜色损失"
+        "--other_loss_weight",
+        type=float,
+        default=0.0,
+        help="额外损失的权重系数"
     )
     parser.add_argument(
         "--extra_cond1",
@@ -690,7 +706,7 @@ def main():
 
     # 给output_dir添加时间戳
     import time
-    args.output_dir = os.path.join(args.output_dir, time.strftime("%m%d_%H:%M"))
+    args.output_dir = os.path.join(args.output_dir, time.strftime("%m%d_%H%M"))
     
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -706,12 +722,11 @@ def main():
     )
 
     # 在初始化accelerator之后添加
-    if args.color_loss_type == "lpips":
+    if args.other_loss_type == "lpips":
         lpips_model = lpips.LPIPS(net='vgg').to(accelerator.device)
         lpips_model.requires_grad_(False)
         lpips_model.eval()
-    else:
-        lpips_model = None
+
 
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
     # This will be enabled soon in accelerate. For now, we don't allow gradient accumulation when training two models.
@@ -966,11 +981,11 @@ def main():
         validation_extra_cond2_image = None
         validation_extra_cond3_image = None
         if "extra_cond1" in args and args.extra_cond1 is not None:
-            validation_extra_cond1_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond1_images", validation_image_names[random_index])).convert("RGB")
+            validation_extra_cond1_image = Image.open(os.path.join(args.extra_cond1.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
         if "extra_cond2" in args and args.extra_cond2 is not None:
-            validation_extra_cond2_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond2_images", validation_image_names[random_index])).convert("RGB")
+            validation_extra_cond2_image = Image.open(os.path.join(args.extra_cond2.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
         if "extra_cond3" in args and args.extra_cond3 is not None:
-            validation_extra_cond3_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond3_images", validation_image_names[random_index])).convert("RGB")
+            validation_extra_cond3_image = Image.open(os.path.join(args.extra_cond3.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
 
         validation_cloth_warp_image = None
         validation_cloth_warp_mask = None
@@ -994,6 +1009,7 @@ def main():
             extra_cond1=validation_extra_cond1_image,
             extra_cond2=validation_extra_cond2_image,
             extra_cond3=validation_extra_cond3_image,
+            show_whole_image=True,
         )[0]
         
         # 保存推理结果
@@ -1084,17 +1100,17 @@ def main():
 
 
                 if "extra_cond1" in args and args.extra_cond1 is not None:
-                    latents_to_concat.append(vae.encode(batch["extra_cond1_images"]).latent_dist.sample())
+                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
                     masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(batch["extra_cond1_images"]).latent_dist.sample())
+                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
                 if "extra_cond2" in args and args.extra_cond2 is not None:
-                    latents_to_concat.append(vae.encode(batch["extra_cond2_images"]).latent_dist.sample())
+                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond2_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
                     masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(batch["extra_cond2_images"]).latent_dist.sample())
+                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond2_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
                 if "extra_cond3" in args and args.extra_cond3 is not None:
-                    latents_to_concat.append(vae.encode(batch["extra_cond3_images"]).latent_dist.sample())
+                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond3_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
                     masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(batch["extra_cond3_images"]).latent_dist.sample())
+                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond3_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
 
                 # 拼接所有latents
                 latent_model_input_p1 = torch.cat(latents_to_concat, dim=-2)
@@ -1116,72 +1132,49 @@ def main():
                 # 预测噪声残差
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=None).sample
 
-                # === 新增：生成RGB图像用于颜色损失计算 ===
-                with torch.no_grad():
-                    # 显存优化
-                    with torch.autocast(accelerator.device.type):
-                        # 解码生成图像（使用真实潜变量，非噪声版本）
-                        generated_rgb = vae.decode(
-                            latent_model_input_p1 / vae.config.scaling_factor,
-                            return_dict=False
-                        )[0].clamp(-1, 1)
-                        generated_rgb = (generated_rgb + 1) / 2  # 归一化到[0,1]
-                        # 在-2维度进行剪裁为512x512
-                        generated_rgb = generated_rgb[:, :, :512, :384]
-                
-                # 计算颜色损失（每隔指定步数计算）
-                color_loss = 0
-                if global_step % args.color_loss_interval == 0:
-                    # 获取真实图像和掩膜
-                    real_rgb = real_images_batch.to(weight_dtype)  # [0,1]范围
-                    mask = real_masks_batch  # 1表示保留区域，0表示掩膜
-                    
-                    if args.color_loss_type == "lpips":
-                        # 使用LPIPS计算感知损失（仅在可见区域）
-                        # print(f"生成图像的shape: {generated_rgb.shape}")
-                        # print(f"真实图像的shape: {real_rgb.shape}")
-                        # print(f"可见区域的shape: {visible_mask.shape}")
-                        color_loss = lpips_model(
-                            generated_rgb * mask,
-                            real_rgb * mask
-                        ).mean()
-                    else:
-                        # 使用MSE计算像素级差异
-                        color_loss = F.mse_loss(
-                            generated_rgb * mask,
-                            real_rgb * mask
-                        )
-                    
-                    print(f"颜色损失: {color_loss}")
-
                 # 计算DREAM损失
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                    # 确保mask_latent的维度与noise_pred匹配
-                    dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
-                    # 根据实际的latent_append_num扩展dream_weights
-                    num_appends = 1+ (args.use_warp_as_condition) + (args.extra_cond1 is not None) + (args.extra_cond2 is not None) + (args.extra_cond3 is not None)
-                    # print(f"num_appends: {num_appends}")
-                    #! 注意这里先尝试一下全0，看看效果
-                    # 扩展dream_weights
-                    dream_weights = torch.cat([dream_weights] + [torch.zeros_like(dream_weights)] * num_appends, dim=-2)
-                    
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
-                    loss = (loss * dream_weights).mean()
-                    #! 新增：添加颜色损失
-                    total_loss = loss + color_loss * args.color_loss_weight
+                target = noise
+                # 确保mask_latent的维度与noise_pred匹配
+                dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
+                # 根据实际的latent_append_num扩展dream_weights
+                num_appends = 1+ (args.use_warp_as_condition) + (args.extra_cond1 is not None) + (args.extra_cond2 is not None) + (args.extra_cond3 is not None)
+                # print(f"num_appends: {num_appends}")
+                #! 注意这里先尝试一下全1，看看效果
+                # 扩展dream_weights
+                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] * num_appends, dim=-2)
+                
+                # 改用Huber Loss（Smooth L1）
+                # loss =  F.smooth_l1_loss(noise_pred.float(), target.float(), reduction="none", beta=1.5)
+                # 混合MSE和MAE
+                mse_loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
+                # mae_loss = F.l1_loss(noise_pred.float(), target.float(), reduction="none")
+                loss = mse_loss
+
+                loss = (loss * dream_weights).mean()
+                
+                #! 新增：添加颜色损失
+
+                other_loss = 0
+                if args.other_loss_type == "lpips":
+                    generated_images  = vae.decode(noisy_latents / vae.config.scaling_factor, return_dict=False)[0]
+                    target_images  = vae.decode(target / vae.config.scaling_factor, return_dict=False)[0]
+                    other_loss = lpips_model(generated_images, target_images).mean()
+                    other_loss = (other_loss * dream_weights).mean()
+                elif args.other_loss_type == "canny":
+                    generated_images  = vae.decode(noisy_latents / vae.config.scaling_factor, return_dict=False)[0]
+                    target_images  = vae.decode(target / vae.config.scaling_factor, return_dict=False)[0]
+                    edge_generated = canny_edge_detector(generated_images)
+                    edge_target = canny_edge_detector(target_images)
+                    other_loss = F.mse_loss(edge_generated, edge_target).mean()
+                    other_loss = (other_loss * dream_weights).mean()
                 else:
-                    # v_prediction的情况类似
-                    target = noise_scheduler.get_velocity(latent_model_input_p1, noise, timesteps)
-                    dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
-                    dream_weights = torch.cat([dream_weights] + [torch.zeros_like(dream_weights)] * num_appends, dim=-2)
-                    loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
-                    loss = (loss * dream_weights).mean()
-                    #! 新增：添加颜色损失
-                    total_loss = loss + color_loss * args.color_loss_weight
+                    other_loss = 0
+
+                total_loss = loss  +  other_loss * args.other_loss_weight
+
 
                 # 在反向传播前检查损失是否有梯度
-                if not loss.requires_grad:
+                if not total_loss.requires_grad:
                     raise ValueError("损失没有梯度！请检查模型参数是否正确解冻。")
 
                 accelerator.backward(total_loss)
@@ -1211,8 +1204,9 @@ def main():
                     print("正在生成验证图片...")
                     random_index = np.random.randint(0, len(validation_image_names))
                     print(f"生成的图片的原路径是：\n{os.path.join(args.validation_root_dir, 'real_images', validation_image_names[random_index])}")
+                    print( "catvton生成的路径是："+"\n/mnt/pub_data/results/vton_test/inference_results_catvton/" + validation_image_names[random_index])
                     output_path = os.path.join(args.output_dir, f"validation_step_{global_step}.png")
-                    
+                    print("本次训练生成图片的路径是："+"\n"+output_path)
                     # 加载验证图片
                     validation_image = Image.open(os.path.join(args.validation_root_dir, "real_images", validation_image_names[random_index])).convert("RGB")
                     validation_mask = Image.open(os.path.join(args.validation_root_dir, "real_masks", validation_image_names[random_index])).convert("L")
@@ -1229,11 +1223,11 @@ def main():
                     validation_extra_cond2_image = None
                     validation_extra_cond3_image = None
                     if "extra_cond1" in args and args.extra_cond1 is not None:
-                        validation_extra_cond1_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond1_images", validation_image_names[random_index])).convert("RGB")
+                        validation_extra_cond1_image = Image.open(os.path.join(args.extra_cond1.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
                     if "extra_cond2" in args and args.extra_cond2 is not None:
-                        validation_extra_cond2_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond2_images", validation_image_names[random_index])).convert("RGB")
+                        validation_extra_cond2_image = Image.open(os.path.join(args.extra_cond2.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
                     if "extra_cond3" in args and args.extra_cond3 is not None:
-                        validation_extra_cond3_image = Image.open(os.path.join(args.validation_root_dir, "extra_cond3_images", validation_image_names[random_index])).convert("RGB")
+                        validation_extra_cond3_image = Image.open(os.path.join(args.extra_cond3.replace("vton", "vton_test"), validation_image_names[random_index])).convert("RGB")
 
                     # 生成验证图片
                     with torch.autocast(accelerator.device.type):
@@ -1252,18 +1246,18 @@ def main():
                             extra_cond1=validation_extra_cond1_image,
                             extra_cond2=validation_extra_cond2_image,
                             extra_cond3=validation_extra_cond3_image,
+                            show_whole_image=True,
                         )[0]
 
                     # 保存验证图片
                     result.save(output_path)
-                    print(f"验证图片已保存到: {output_path}")
                     
                     # 确保模型回到训练模式
                     unet.train()
                     if args.train_text_encoder:
                         text_encoder.train()
 
-            logs = {"dream_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {"loss": total_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 

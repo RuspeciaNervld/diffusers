@@ -335,6 +335,7 @@ def run_inference_2(
     guidance_scale: float = 2.5,
     generator=None,
     eta=1.0,
+    show_whole_image:bool = False,
     **kwargs
 ):
     total_latent_num = 2 + (use_warp_as_condition) + (extra_cond1 is not None) + (extra_cond2 is not None) + (extra_cond3 is not None)
@@ -464,7 +465,8 @@ def run_inference_2(
                 progress_bar.update()
 
     # 解码最终的潜变量（只取real_images对应的部分）
-    latents = latents.split(latents.shape[-2] // total_latent_num, dim=-2)[0]  # 根据latent_append_num来分割
+    if not show_whole_image:
+        latents = latents.split(latents.shape[-2] // total_latent_num, dim=-2)[0]  # 根据latent_append_num来分割
     latents = 1 / vae.config.scaling_factor * latents
     image = vae.decode(latents.to(vae.device, dtype=vae.dtype)).sample
     image = (image / 2 + 0.5).clamp(0, 1)
