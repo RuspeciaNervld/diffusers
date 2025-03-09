@@ -182,15 +182,9 @@ def run_inference_2(
     show_whole_image:bool = False,
     **kwargs
 ):
-    total_latent_num = 1 + (use_warp_as_condition) + (use_origin_condition) + (extra_cond1 is not None) + (extra_cond2 is not None) + (extra_cond3 is not None)
     # 打印推理参数，重点是用哪些latent
-    print("cloth_warp存在" if cloth_warp_image is not None else "cloth_warp不存在")
-    print("warp_cloth作为条件" if use_warp_as_condition else "warp_cloth作为底图")
-    print("origin_condition" if use_origin_condition else "condition_image作为条件")
-    print(f"使用extra_cond1: {extra_cond1 is not None}")
-    print(f"使用extra_cond2: {extra_cond2 is not None}")
-    print(f"使用extra_cond3: {extra_cond3 is not None}")
-    
+    print("像素空间四宫格：原图+warp图；condition+extra_cond1")
+
     # 把模型移动到cuda
     unet.to(device)
     vae.to(device)
@@ -198,70 +192,49 @@ def run_inference_2(
     # 准备基础输入
     real_images = prepare_image(image).to(device=device, dtype=weight_dtype)
     real_masks = prepare_mask_image(mask).to(device=device, dtype=weight_dtype)
-    if condition_image is not None:
-        condition_images = prepare_image(condition_image).to(device=device, dtype=weight_dtype)
-    else:
-        condition_images = None
+    condition_images = prepare_image(condition_image).to(device=device, dtype=weight_dtype)
+    cloth_warp_images = prepare_image(cloth_warp_image).to(device=device, dtype=weight_dtype)
+    cloth_warp_masks = prepare_mask_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
+    extra_cond1_images = prepare_image(extra_cond1).to(device=device, dtype=weight_dtype)
+
+    # 在像素空间进行拼接
+    # (B, 3, H, W)
+    real_images_2 = torch.cat([real_images, condition_images], dim=-2)
+    masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
+    masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
+    masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
+    
+    warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+    #! 先尝试上面是extra_cond1_images，下面是warped_masked
+    warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+
+    real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
+    masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
+    masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
     
     # VAE编码基础输入
-    real_image_latents = compute_vae_encodings(real_images, vae)
-    if condition_images is not None:
-        condition_latents = compute_vae_encodings(condition_images, vae)
-    else:
-        condition_latents = torch.full_like(real_image_latents, -1.0)
-    
-    # 准备masked_image
-    masked_real_images = real_images * (real_masks < 0.5)
-    
-    # 处理cloth_warp
-    if cloth_warp_image is not None and cloth_warp_mask is not None:
-        cloth_warp_images = prepare_image(cloth_warp_image).to(device=device, dtype=weight_dtype)
-        cloth_warp_masks = prepare_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
-        cloth_warp_masks = cloth_warp_masks[:, 0:1, :, :]
+    real_image_latents = compute_vae_encodings(real_images_4, vae)
+    masked_real_images_latents = compute_vae_encodings(masked_real_images_4, vae)
+    mask_latent = torch.nn.functional.interpolate(masks_4, size=real_image_latents.shape[-2:], mode="nearest")
+
+    if do_classifier_free_guidance := (guidance_scale > 1.0):
+        # uncond_real_images_2 = torch.cat([masked_real_images_1, torch.zeros_like(condition_images)], dim=-2)
+        # uncond_real_images_4 = torch.cat([uncond_real_images_2, torch.zeros_like(extra_cond1_images)], dim=-1)
+
+        # 把condition_images变成全黑 -1
+        uncond_masked_real_images_2 = torch.cat([masked_real_images_1, torch.full_like(condition_images, -1.0)], dim=-2)
+        uncond_masked_real_images_4 = torch.cat([uncond_masked_real_images_2, torch.full_like(uncond_masked_real_images_2,-1.0)], dim=-1)
+
         
-        # 将cloth_warp_images通过cloth_warp_masks贴到masked_real_images上
-        cloth_warp_part = cloth_warp_images * (cloth_warp_masks >= 0.5)
-        masked_part = masked_real_images + cloth_warp_part
-    else:
-        masked_part = masked_real_images
-    
-    masked_part_latents = compute_vae_encodings(masked_part, vae)
-    masked_real_images_latents = compute_vae_encodings(masked_real_images, vae)
-    mask_latent = torch.nn.functional.interpolate(real_masks, size=real_image_latents.shape[-2:], mode="nearest")
+        # uncond_real_image_latents = compute_vae_encodings(uncond_real_images_4, vae)
+        uncond_masked_real_images_latents = compute_vae_encodings(uncond_masked_real_images_4, vae)
 
-
-    latents_to_concat_1 = [real_image_latents, condition_latents]
-    masks_to_concat_1 = [mask_latent, torch.zeros_like(mask_latent)]
-    masked_latents_to_concat_1 = [masked_real_images_latents, condition_latents]
-
-
-    # latents_to_concat_2 = [masked_part_latents,extra_cond1_latents:=compute_vae_encodings(prepare_image(extra_cond1).to(device=device, dtype=weight_dtype), vae)]
-    # masks_to_concat_2 = [torch.zeros_like(mask_latent),torch.zeros_like(mask_latent)]
-    # masked_latents_to_concat_2 = [masked_part_latents, extra_cond1_latents]
-
-    # 12维反转
-    latents_to_concat_2 = [extra_cond1_latents:=compute_vae_encodings(prepare_image(extra_cond1).to(device=device, dtype=weight_dtype), vae), masked_part_latents]
-    masks_to_concat_2 = [torch.zeros_like(mask_latent),mask_latent]
-    masked_latents_to_concat_2 = [extra_cond1_latents, masked_part_latents]
-
-
-    # 拼接latents
-    latent_model_input_p1_1 = torch.cat(latents_to_concat_1, dim=-2)
-    mask_latent_concat_1 = torch.cat(masks_to_concat_1, dim=-2)
-    masked_latent_concat_1 = torch.cat(masked_latents_to_concat_1, dim=-2)
-
-    latent_model_input_p1_2 = torch.cat(latents_to_concat_2, dim=-2)
-    mask_latent_concat_2 = torch.cat(masks_to_concat_2, dim=-2)
-    masked_latent_concat_2 = torch.cat(masked_latents_to_concat_2, dim=-2)
-
-    latent_model_input_p1 = torch.cat([latent_model_input_p1_1, latent_model_input_p1_2], dim=-1)
-    mask_latent_concat = torch.cat([mask_latent_concat_1, mask_latent_concat_2], dim=-1)
-    masked_latent_concat = torch.cat([masked_latent_concat_1, masked_latent_concat_2], dim=-1)
-
+        masked_latent_concat = torch.cat([uncond_masked_real_images_latents, masked_real_images_latents])
+        mask_latent_concat = torch.cat([mask_latent] * 2)
 
     # 准备初始噪声
     latents = randn_tensor(
-        latent_model_input_p1.shape,
+        real_image_latents.shape,
         generator=generator,
         device=device,
         dtype=weight_dtype,
@@ -272,20 +245,6 @@ def run_inference_2(
     timesteps = noise_scheduler.timesteps
     latents = latents * noise_scheduler.init_noise_sigma
 
-    # Classifier-Free Guidance
-    if do_classifier_free_guidance := (guidance_scale > 1.0):
-        # 创建无条件分支
-        # 双倍高宽的real_image_latents
-        zero_latents = torch.zeros_like(real_image_latents)
-        zero_latents_vertical_to_concat = [zero_latents] * 2
-        zero_latents_vertical = torch.cat(zero_latents_vertical_to_concat, dim=-2)
-
-        
-        uncond_masked_latent_concat = torch.cat([masked_part_latents] + [zero_latents], dim=-2)
-        uncond_masked_latent_concat = torch.cat([uncond_masked_latent_concat, zero_latents_vertical], dim=-1)
-        # 只有grid1
-        masked_latent_concat = torch.cat([uncond_masked_latent_concat, masked_latent_concat])
-        mask_latent_concat = torch.cat([mask_latent_concat] * 2)
 
     # 去噪循环的额外参数
     extra_step_kwargs = prepare_extra_step_kwargs(noise_scheduler, generator, eta)

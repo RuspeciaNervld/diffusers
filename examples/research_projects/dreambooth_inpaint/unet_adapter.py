@@ -1,7 +1,7 @@
 import torch
+import torch.nn as nn
 from accelerate import load_checkpoint_in_model
 import torch.nn.functional as F
-
 
 class SkipAttnProcessor(torch.nn.Module):
     def __init__(self, *args, **kwargs) -> None:
@@ -142,6 +142,79 @@ def init_adapter(unet,
     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
     return adapter_modules
 
+# def init_adapter_v2(
+#     unet, 
+#     self_attn_cls=SkipAttnProcessor,  # 自注意力默认处理器
+#     cross_attn_cls=DualAttnProcessor,  # 交叉注意力自定义处理器
+#     activate_blocks=["mid_block", "up_blocks"],
+#     **kwargs
+# ):
+#     if cross_attn_dim is None:
+#         cross_attn_dim = unet.config.cross_attention_dim
+#     attn_procs = {}
+#     for name in unet.attn_processors.keys():
+#         # 判断是否为上采样阶段的交叉注意力层
+#         is_up_cross = (
+#             name.startswith(tuple(activate_blocks)) and 
+#             "attn2" in name and 
+#             "up_blocks" in name
+#         )
+#         # 配置特殊参数给上采样交叉注意力层
+#         if is_up_cross:
+#             attn_procs[name] = cross_attn_cls(
+#                 hidden_size=list(reversed(unet.config.block_out_channels))[
+#                     int(name.split(".")[1]) # 获取block_id
+#                 ],
+#                 text_cross_dim=cross_attn_dim,
+#                 image_cond_dim=image_cond_dim,  # 传递图像编码维度
+#                 **kwargs
+#             )
+#         else: 
+#             cross_attention_dim = None if name.endswith("attn1.processor") else cross_attn_dim
+#             if name.startswith("mid_block"):
+#                 hidden_size = unet.config.block_out_channels[-1]
+#             elif name.startswith("up_blocks"):
+#                 block_id = int(name[len("up_blocks.")])
+#                 hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+#             elif name.startswith("down_blocks"):
+#                 block_id = int(name[len("down_blocks.")])
+#                 hidden_size = unet.config.block_out_channels[block_id]
+#             if cross_attention_dim is None:
+#                 if self_attn_cls is not None:
+#                     attn_procs[name] = self_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
+#                 else:
+#                     # retain the original attn processor
+#                     attn_procs[name] = AttnProcessor2_0(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
+#             else:
+#                 attn_procs[name] = cross_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
+                                                        
+#     unet.set_attn_processor(attn_procs)
+#     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
+#     return adapter_modules
+
+#     # 遍历所有注意力层
+#     for name in unet.attn_processors.keys():
+
+#         # 交叉注意力层配置（仅在后半部分）
+#         elif "attn2" in name and any([name.startswith(b) for b in activate_blocks]):
+#             # 获取隐藏层维度
+#             if name.startswith("mid_block"):
+#                 hidden_size = unet.config.block_out_channels[-1]
+#             else:
+#                 block_id = int(name.split(".")[1])
+#                 hidden_size = unet.config.block_out_channels[-(block_id+1)]
+            
+#             # 初始化双处理器
+#             attn_procs[name] = cross_attn_cls(
+#                 hidden_size=hidden_size,
+#                 cross_attention_dim=unet.config.cross_attention_dim
+#             )
+#         else:
+#             # 保留原始处理器
+#             attn_procs[name] = unet.attn_processors[name]
+    
+#     unet.set_attn_processor(attn_procs)
+#     return unet
 
 # ! 加载catvton的attention权重
 def get_trainable_module(unet, trainable_module_name):
@@ -196,3 +269,56 @@ def adapt_unet_with_catvton_attn(unet, catvton_attn_path=None, trainable_modules
     return attn_modules
 
     #! 到此成功加载catvton的attention权重，但是他把交叉注意力层关闭了
+
+
+# def adapt_unet_with_catvton_and_my_attn(
+#     unet, 
+#     catvton_path=None, 
+#     my_weights_path=None,
+#     trainable_modules="attention",
+#     condition_dim=512
+# ):
+#     """双权重加载适配函数"""
+#     # 步骤1：初始化双处理器结构
+#     init_adapter_v2(unet)
+    
+#     # 模块分离
+#     catvton_modules = []
+#     my_modules = []
+    
+#     # 分离自注意力和交叉注意力模块
+#     for name, module in unet.named_modules():
+#         if "attn1" in name and any([n in name for n in ["mid_block", "up_blocks"]]):
+#             catvton_modules.append(module)
+#         elif "attn2" in name and any([n in name for n in ["mid_block", "up_blocks"]]):
+#             my_modules.append(module)
+    
+#     # 步骤2：加载CatVton权重到自注意力层
+#     if catvton_path:
+#         # 创建权重映射表
+#         catvton_state = torch.load(catvton_path)
+#         mapped_state = {}
+#         for k, v in catvton_state.items():
+#             new_key = k.replace("attn_layers", "attn1.processor.self_attn_proj")
+#             mapped_state[new_key] = v
+#         for mod in catvton_modules:
+#             mod.load_state_dict(mapped_state, strict=False)
+    
+#     # 步骤3：加载自定义权重到交叉注意力层
+#     if my_weights_path:
+#         my_state = torch.load(my_weights_path)
+#         for mod in my_modules:
+#             # 调整键名匹配
+#             mod.cross_attn_proj.load_state_dict({
+#                 k.replace("cross_attn.", ""): v 
+#                 for k, v in my_state.items()
+#             }, strict=True)
+    
+#     # 配置可训练参数
+#     trainable_params = []
+#     if "self_attn" in trainable_modules:
+#         trainable_params += [p for mod in catvton_modules for p in mod.parameters()]
+#     if "cross_attn" in trainable_modules:
+#         trainable_params += [p for mod in my_modules for p in mod.parameters()]
+    
+#     return torch.nn.ModuleList(trainable_params)

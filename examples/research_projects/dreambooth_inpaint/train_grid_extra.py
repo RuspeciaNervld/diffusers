@@ -19,8 +19,8 @@ from PIL import Image, ImageDraw
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel
-from train_grid_infer import run_inference_2
+from transformers import CLIPTextModel, CLIPTokenizer
+from train_grid_extra_infer import run_inference_2
 import json
 from unet_adapter import adapt_unet_with_catvton_attn
 import lpips
@@ -28,6 +28,7 @@ from torchvision.transforms.functional import to_tensor
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import mean_squared_error as mse
 from skimage.color import rgb2lab
+from image_encoder import CLIPPeftModel
 
 from diffusers import (
     AutoencoderKL,
@@ -412,11 +413,42 @@ def parse_args():
         help="是否使用原始condition"
     )
     parser.add_argument(
-        "--pretrained_clip_model",
-        type=str,
-        default="openai/clip-vit-large-patch14",
-        help="预训练的CLIP模型名称或路径"
+        "--extra_cond1_drop_out",
+        type=float,
+        default=0.0,
+        help="将extra_cond1 image变为全黑的概率"
     )
+    parser.add_argument(
+        "--pretrained_clip_model_path",
+        type=str,
+        default=None,
+        help="预训练的CLIP模型路径"
+    )
+    parser.add_argument(
+        "--train_image_encoder",
+        action="store_true",
+        help="是否训练image encoder"
+    )
+    parser.add_argument(
+        "--image_encoder_lora_r",
+        type=int,
+        default=8,
+        help="image encoder的lora r"
+    )
+    parser.add_argument(
+        "--image_encoder_lora_alpha",
+        type=int,
+        default=32,
+        help="image encoder的lora alpha"
+    )
+    parser.add_argument(
+        "--image_encoder_lora_dropout",
+        type=float,
+        default=0.0,
+        help="image encoder的lora dropout"
+    )
+
+    
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
@@ -777,7 +809,19 @@ def main():
     # ! 使用stabilityai/sd-vae-ft-mse作为vae
     vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
-    image_encoder = CLIPVisionModel.from_pretrained(args.pretrained_clip_model, subfolder="image_encoder")
+    image_encoder = CLIPPeftModel(
+        clip_model_name='ViT-B/32',
+        checkpoint_path=args.pretrained_clip_model_path,
+        lora_r=args.image_encoder_lora_r,
+        lora_alpha=args.image_encoder_lora_alpha,
+        lora_dropout=args.image_encoder_lora_dropout,
+        lora_trainable_modules=["all","in_proj","out_proj"]
+    )
+    image_encoder.to(accelerator.device)
+    if args.train_image_encoder:
+        image_encoder.train()
+    else:
+        image_encoder.eval()
 
     attn_modules = adapt_unet_with_catvton_attn(
         unet = unet,
@@ -1031,7 +1075,7 @@ def main():
         
         # 保存推理结果
         result.save(os.path.join(args.output_dir, "pretrain_test.png"))
-        print(f"预训练测试图片已保存到: {os.path.join(args.output_dir, 'pretrain_test.png')}")
+        print(f"预训练测试图片已保存到: \n{os.path.join(args.output_dir, 'pretrain_test.png')}\n")
 
         # 清理显存
         if torch.cuda.is_available():
@@ -1051,113 +1095,63 @@ def main():
 
             with accelerator.accumulate(unet):
                 # 基础输入处理
-                real_images_batch = batch["real_images"]
-                real_masks_batch = batch["real_masks"]
-                # 预处理mask
-                real_images_batch = prepare_image(real_images_batch).to(device=accelerator.device, dtype=weight_dtype)
-                real_masks_batch = prepare_mask_image(real_masks_batch).to(device=accelerator.device, dtype=weight_dtype)
-                # 将real_images转换到潜空间
-                real_image_latents = vae.encode(real_images_batch).latent_dist.sample()
-                real_image_latents = real_image_latents * vae.config.scaling_factor
-
-                # 处理condition_images，添加dropout
+                real_images = prepare_image(batch["real_images"]).to(device=accelerator.device, dtype=weight_dtype)
+                real_masks = prepare_mask_image(batch["real_masks"]).to(device=accelerator.device, dtype=weight_dtype)
                 condition_images = prepare_image(batch["condition_images"]).to(device=accelerator.device, dtype=weight_dtype)
+                cloth_warp_images = prepare_image(batch["cloth_warp_images"]).to(device=accelerator.device, dtype=weight_dtype)
+                cloth_warp_masks = prepare_mask_image(batch["cloth_warp_masks"]).to(device=accelerator.device, dtype=weight_dtype)
+                extra_cond1_images = prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)
+                # 决定哪些样本的condition image要变成全黑
+                condition_dropout_mask = torch.rand_like(condition_images) < args.condition_image_drop_out
+                condition_images = torch.where(condition_dropout_mask, torch.zeros_like(condition_images), condition_images)
+                # 决定哪些样本的cloth_warp_images要变成全黑
+                cloth_warp_dropout_mask = torch.rand_like(cloth_warp_images) < args.cloth_warp_drop_out
+                cloth_warp_images = torch.where(cloth_warp_dropout_mask, torch.zeros_like(cloth_warp_images), cloth_warp_images)
+                # 决定哪些样本的extra_cond1_images要变成全黑
+                extra_cond1_dropout_mask = torch.rand_like(extra_cond1_images) < args.extra_cond1_drop_out
+                extra_cond1_images = torch.where(extra_cond1_dropout_mask, torch.zeros_like(extra_cond1_images), extra_cond1_images)
                 
-                # 生成batch大小的随机数，决定哪些样本的condition image要变成全黑
-                condition_dropout_mask = torch.rand(condition_images.shape[0], 1, 1, 1, device=condition_images.device) < args.condition_image_drop_out
-                condition_dropout_mask = condition_dropout_mask.expand(-1, *condition_images.shape[1:])
+                # 在像素空间进行拼接
+                # (B, 3, H, W)
+                real_images_2 = torch.cat([real_images, condition_images], dim=-2)
+                masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
+                masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
+                masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
                 
-                # 将选中的样本的condition image变成全黑 (-1是归一化后的黑色值)
-                condition_images = torch.where(condition_dropout_mask, torch.full_like(condition_images, -1.0), condition_images)
+                warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+                #! 先尝试上面是extra_cond1_images，下面是warped_masked
+                warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+
+                real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
+                masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
+                masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
                 
-                # 编码condition images
-                condition_image_latents = vae.encode(condition_images).latent_dist.sample()
-                condition_image_latents = condition_image_latents * vae.config.scaling_factor
-
-                # 准备masked_image
-                masked_real_images = real_images_batch * (real_masks_batch < 0.5)
-                
-                # 处理cloth_warp
-                if args.use_warp_cloth:
-                    cloth_warp_images_batch = batch["cloth_warp_images"]
-                    cloth_warp_masks_batch = batch["cloth_warp_masks"]
-                    
-                    # 生成batch大小的随机数，决定哪些样本不使用cloth warp
-                    cloth_warp_dropout_mask = torch.rand(cloth_warp_images_batch.shape[0], 1, 1, 1, device=cloth_warp_images_batch.device) < args.cloth_warp_drop_out
-                    cloth_warp_dropout_mask = cloth_warp_dropout_mask.expand(-1, *cloth_warp_images_batch.shape[1:])
-                    
-                    # 对于要dropout的样本，将cloth_warp_masks设为0，这样就不会应用cloth warp
-                    cloth_warp_masks_batch = torch.where(cloth_warp_dropout_mask, torch.zeros_like(cloth_warp_masks_batch), cloth_warp_masks_batch)
-                    
-                    # 应用cloth warp
-                    cloth_warp_images_batch = cloth_warp_images_batch * (cloth_warp_masks_batch >= 0.5)
-                    masked_part = masked_real_images + cloth_warp_images_batch
-                else:
-                    masked_part = masked_real_images
-
-                # 编码masked_part
-                masked_part_latents = vae.encode(masked_part.to(dtype=weight_dtype)).latent_dist.sample()
-                masked_part_latents = masked_part_latents * vae.config.scaling_factor
-                # 编码masked_real_images
-                masked_real_images_latents = vae.encode(masked_real_images.to(dtype=weight_dtype)).latent_dist.sample()
-                masked_real_images_latents = masked_real_images_latents * vae.config.scaling_factor
-
-                mask_latent = torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest")
-
-                latents_to_concat_1 = [real_image_latents, condition_image_latents]
-                masks_to_concat_1 = [mask_latent, torch.zeros_like(mask_latent)]
-                masked_latents_to_concat_1 = [masked_real_images_latents, condition_image_latents]
-
-
-                # latents_to_concat_2 = [masked_part_latents,extra_cond1_latents:=vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample()]
-                # masks_to_concat_2 = [torch.zeros_like(mask_latent),torch.zeros_like(mask_latent)]
-                # masked_latents_to_concat_2 = [masked_part_latents, extra_cond1_latents]
-
-                # 12维反转
-                latents_to_concat_2 = [extra_cond1_latents:=vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample(),masked_part_latents]
-                masks_to_concat_2 = [torch.zeros_like(mask_latent),mask_latent]
-                masked_latents_to_concat_2 = [extra_cond1_latents, masked_part_latents]
-
-
-                # 拼接latents
-                latent_model_input_p1_1 = torch.cat(latents_to_concat_1, dim=-2)
-                mask_latent_concat_1 = torch.cat(masks_to_concat_1, dim=-2)
-                masked_latent_concat_1 = torch.cat(masked_latents_to_concat_1, dim=-2)
-
-                latent_model_input_p1_2 = torch.cat(latents_to_concat_2, dim=-2)
-                mask_latent_concat_2 = torch.cat(masks_to_concat_2, dim=-2)
-                masked_latent_concat_2 = torch.cat(masked_latents_to_concat_2, dim=-2)
-
-                latent_model_input_p1 = torch.cat([latent_model_input_p1_1, latent_model_input_p1_2], dim=-1)
-                mask_latent_concat = torch.cat([mask_latent_concat_1, mask_latent_concat_2], dim=-1)
-                masked_latent_concat = torch.cat([masked_latent_concat_1, masked_latent_concat_2], dim=-1)
+                # VAE编码基础输入
+                real_image_latents = vae.encode(real_images_4).latent_dist.sample()
+                masked_real_images_latents = vae.encode(masked_real_images_4).latent_dist.sample()
+                mask_latent = torch.nn.functional.interpolate(masks_4, size=real_image_latents.shape[-2:], mode="nearest")
 
                 # 添加噪声
-                noise = torch.randn_like(latent_model_input_p1)
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latent_model_input_p1.shape[0],), device=latent_model_input_p1.device)
-                noisy_latents = noise_scheduler.add_noise(latent_model_input_p1, noise, timesteps)
+                noise = torch.randn_like(real_image_latents)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (real_image_latents.shape[0],), device=real_image_latents.device)
+                noisy_latents = noise_scheduler.add_noise(real_image_latents, noise, timesteps)
 
                 # 连接所有输入
                 latent_model_input = torch.cat([
                     noisy_latents,
-                    mask_latent_concat,
-                    masked_latent_concat,
+                    mask_latent,
+                    masked_real_images_latents,
                 ], dim=1)
 
+                image_encoder_hidden_states = image_encoder(condition_images)
+
                 # 预测噪声残差
-                noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=None).sample
+                noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=image_encoder_hidden_states).sample
 
                 # 计算DREAM损失
                 target = noise
                 # 确保mask_latent的维度与noise_pred匹配
                 dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
-                # 根据实际的latent_append_num扩展dream_weights
-                num_appends =  (args.use_warp_as_condition) + (args.use_origin_condition) + (args.extra_cond1 is not None) + (args.extra_cond2 is not None) + (args.extra_cond3 is not None)
-                # print(f"num_appends: {num_appends}")
-                #! 注意这里先尝试一下全1，看看效果
-                # 扩展dream_weights
-                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] , dim=-2)
-                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] , dim=-1)
                 
                 # 改用Huber Loss（Smooth L1）
                 # loss =  F.smooth_l1_loss(noise_pred.float(), target.float(), reduction="none", beta=1.5)
