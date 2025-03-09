@@ -229,47 +229,35 @@ def run_inference_2(
     masked_real_images_latents = compute_vae_encodings(masked_real_images, vae)
     mask_latent = torch.nn.functional.interpolate(real_masks, size=real_image_latents.shape[-2:], mode="nearest")
 
-    if use_warp_as_condition: # 用warp作为条件而不是底图
-        if use_origin_condition:
-            latents_to_concat = [real_image_latents, condition_latents, masked_part_latents]
-            masks_to_concat = [mask_latent, torch.zeros_like(mask_latent), torch.zeros_like(mask_latent)]
-            masked_latents_to_concat = [masked_real_images_latents, condition_latents, masked_part_latents]
-        else:
-            latents_to_concat = [real_image_latents, masked_part_latents]
-            masks_to_concat = [mask_latent, torch.zeros_like(mask_latent)]
-            masked_latents_to_concat = [masked_part_latents, masked_part_latents]
-    else:
-        if use_origin_condition:
-            latents_to_concat = [real_image_latents, condition_latents]
-            masks_to_concat = [mask_latent, torch.zeros_like(mask_latent)]
-            masked_latents_to_concat = [masked_part_latents, condition_latents]
-        else:
-            latents_to_concat = [real_image_latents]
-            masks_to_concat = [mask_latent]
-            masked_latents_to_concat = [masked_part_latents]
 
-    if extra_cond1 is not None:
-        extra_cond1_latents = compute_vae_encodings(prepare_image(extra_cond1).to(device=device, dtype=weight_dtype), vae)
-        latents_to_concat.append(extra_cond1_latents)
-        masks_to_concat.append(torch.zeros_like(mask_latent))
-        masked_latents_to_concat.append(extra_cond1_latents)
+    latents_to_concat_1 = [real_image_latents, condition_latents]
+    masks_to_concat_1 = [mask_latent, torch.zeros_like(mask_latent)]
+    masked_latents_to_concat_1 = [masked_real_images_latents, condition_latents]
 
-    if extra_cond2 is not None:
-        extra_cond2_latents = compute_vae_encodings(prepare_image(extra_cond2).to(device=device, dtype=weight_dtype), vae)
-        latents_to_concat.append(extra_cond2_latents)
-        masks_to_concat.append(torch.zeros_like(mask_latent))
-        masked_latents_to_concat.append(extra_cond2_latents)
-    
-    if extra_cond3 is not None:
-        extra_cond3_latents = compute_vae_encodings(prepare_image(extra_cond3).to(device=device, dtype=weight_dtype), vae)
-        latents_to_concat.append(extra_cond3_latents)
-        masks_to_concat.append(torch.zeros_like(mask_latent))
-        masked_latents_to_concat.append(extra_cond3_latents)
-    
+
+    # latents_to_concat_2 = [masked_part_latents,extra_cond1_latents:=compute_vae_encodings(prepare_image(extra_cond1).to(device=device, dtype=weight_dtype), vae)]
+    # masks_to_concat_2 = [torch.zeros_like(mask_latent),torch.zeros_like(mask_latent)]
+    # masked_latents_to_concat_2 = [masked_part_latents, extra_cond1_latents]
+
+    # 12维反转
+    latents_to_concat_2 = [extra_cond1_latents:=compute_vae_encodings(prepare_image(extra_cond1).to(device=device, dtype=weight_dtype), vae), masked_part_latents]
+    masks_to_concat_2 = [torch.zeros_like(mask_latent),mask_latent]
+    masked_latents_to_concat_2 = [extra_cond1_latents, masked_part_latents]
+
+
     # 拼接latents
-    latent_model_input_p1 = torch.cat(latents_to_concat, dim=-2)
-    mask_latent_concat = torch.cat(masks_to_concat, dim=-2)
-    masked_latent_concat = torch.cat(masked_latents_to_concat, dim=-2)
+    latent_model_input_p1_1 = torch.cat(latents_to_concat_1, dim=-2)
+    mask_latent_concat_1 = torch.cat(masks_to_concat_1, dim=-2)
+    masked_latent_concat_1 = torch.cat(masked_latents_to_concat_1, dim=-2)
+
+    latent_model_input_p1_2 = torch.cat(latents_to_concat_2, dim=-2)
+    mask_latent_concat_2 = torch.cat(masks_to_concat_2, dim=-2)
+    masked_latent_concat_2 = torch.cat(masked_latents_to_concat_2, dim=-2)
+
+    latent_model_input_p1 = torch.cat([latent_model_input_p1_1, latent_model_input_p1_2], dim=-1)
+    mask_latent_concat = torch.cat([mask_latent_concat_1, mask_latent_concat_2], dim=-1)
+    masked_latent_concat = torch.cat([masked_latent_concat_1, masked_latent_concat_2], dim=-1)
+
 
     # 准备初始噪声
     latents = randn_tensor(
@@ -287,8 +275,15 @@ def run_inference_2(
     # Classifier-Free Guidance
     if do_classifier_free_guidance := (guidance_scale > 1.0):
         # 创建无条件分支
-        zero_latents = [torch.zeros_like(l) for l in latents_to_concat[1:]]  # 跳过real_image_latents
-        uncond_masked_latent_concat = torch.cat([masked_part_latents] + zero_latents, dim=-2)
+        # 双倍高宽的real_image_latents
+        zero_latents = torch.zeros_like(real_image_latents)
+        zero_latents_vertical_to_concat = [zero_latents] * 2
+        zero_latents_vertical = torch.cat(zero_latents_vertical_to_concat, dim=-2)
+
+        
+        uncond_masked_latent_concat = torch.cat([masked_part_latents] + [zero_latents], dim=-2)
+        uncond_masked_latent_concat = torch.cat([uncond_masked_latent_concat, zero_latents_vertical], dim=-1)
+        # 只有grid1
         masked_latent_concat = torch.cat([uncond_masked_latent_concat, masked_latent_concat])
         mask_latent_concat = torch.cat([mask_latent_concat] * 2)
 

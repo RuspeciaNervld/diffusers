@@ -9,28 +9,29 @@ import torchvision.transforms as transforms
 import json
 # 添加项目根目录到Python路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from catvton_base_infer import run_inference
-from train_dreambooth_inpaint_catvton_base import DreamBoothDataset, collate_fn, adapt_unet_with_catvton_attn
+from catvton_base_infer import run_inference_2
+from train_color_loss import DreamBoothDataset, collate_fn, adapt_unet_with_catvton_attn
 
 # 全局配置
 CONFIG = {
     # 模型和路径配置
-    "test_data_root" :"/mnt/pub_data/vton_test",
+    "test_data_root" :"/mnt/pub_data/vton_test_small",
     "pretrained_model_path": "/mnt/pub_data/booksforcharlie-stable-diffusion-inpainting",
     "catvton_attn_path": "/mnt/pub_data/catvton_unet_attn",
-    "my_unet_attn_path": None,
-    "output_dir": "/mnt/pub_data/results/vton_test/inference_results_catvton",
-    "latent_append_num": 1,
+    "my_unet_attn_path": "/mnt/pub_data/train_output/4 小dream确实保持了颜色，但是糊了，大批量速度很慢/step-800", # 有的话会覆盖catvton_attn_path
+    "output_dir": "/mnt/pub_data/infer_output/4 小dream确实保持了颜色，但是糊了，大批量速度很慢/step-800",
     
     # 条件控制配置
-    "use_warp_cloth": False,
-    "use_openpose_conditioning": False,
-    "use_canny_conditioning": False,
-    # "canny_conditioning_type": 1,
+    "use_warp_cloth": True,
+    "use_warp_as_condition": False,
+    "extra_cond1": "/mnt/pub_data/vton_test_small/detail_images",
+    "extra_cond2": None,
+    "extra_cond3": None,
+
 
     # 训练相关配置
     "resolution": 512,
-    "batch_size": 4,
+    "batch_size": 1,
     "device": "cuda",
     "mixed_precision": "bf16",  # 修改为 "no" 以避免 bitsandbytes 问题
     "trainable_modules": "attention",
@@ -112,10 +113,6 @@ def run_inference_on_test_dataset(test_data_root):
     vae.to(CONFIG["device"], dtype=weight_dtype)
     unet.to(CONFIG["device"], dtype=weight_dtype)
 
-    # 如果有canny_conditioning_type，则
-    canny_conditioning_type = 1
-    if CONFIG["use_canny_conditioning"]:
-        canny_conditioning_type = CONFIG["canny_conditioning_type"]
 
     # 创建测试数据集
     test_dataset = DreamBoothDataset(
@@ -125,10 +122,9 @@ def run_inference_on_test_dataset(test_data_root):
         size=CONFIG["resolution"],
         center_crop=True,
         random_transform=False,
-        canny_conditioning_type=canny_conditioning_type,
-        use_warp_cloth=CONFIG["use_warp_cloth"],
-        use_openpose_conditioning=CONFIG["use_openpose_conditioning"],
-        use_canny_conditioning=CONFIG["use_canny_conditioning"],
+        extra_cond1=CONFIG["extra_cond1"],
+        extra_cond2=CONFIG["extra_cond2"],
+        extra_cond3=CONFIG["extra_cond3"],
     )
 
     # 创建数据加载器
@@ -159,27 +155,28 @@ def run_inference_on_test_dataset(test_data_root):
             # 将数据移到正确的设备和类型
             real_images = batch["real_images"].to(CONFIG["device"], dtype=weight_dtype)
             real_masks = batch["real_masks"].to(CONFIG["device"], dtype=weight_dtype)
-            if "condition_images" in batch and batch["condition_images"] is not None:
-                condition_images = batch["condition_images"].to(CONFIG["device"], dtype=weight_dtype)
-            else:
-                condition_images = None
-            if "cloth_warp_images" in batch and batch["cloth_warp_images"] is not None:
+            condition_images = batch["condition_images"].to(CONFIG["device"], dtype=weight_dtype)
+            if CONFIG["use_warp_cloth"]:
                 cloth_warp_images = batch["cloth_warp_images"].to(CONFIG["device"], dtype=weight_dtype)
                 cloth_warp_masks = batch["cloth_warp_masks"].to(CONFIG["device"], dtype=weight_dtype)
             else:
                 cloth_warp_images = None
                 cloth_warp_masks = None
-            if "openpose_images" in batch and batch["openpose_images"] is not None:
-                openpose_images = batch["openpose_images"].to(CONFIG["device"], dtype=weight_dtype)
+            if CONFIG["extra_cond1"] is not None:
+                extra_cond1 = batch["extra_cond1_images"].to(CONFIG["device"], dtype=weight_dtype)
             else:
-                openpose_images = None
-            if "canny_images" in batch and batch["canny_images"] is not None:
-                canny_images = batch["canny_images"].to(CONFIG["device"], dtype=weight_dtype)
+                extra_cond1 = None
+            if CONFIG["extra_cond2"] is not None:
+                extra_cond2 = batch["extra_cond2_images"].to(CONFIG["device"], dtype=weight_dtype)
             else:
-                canny_images = None
+                extra_cond2 = None
+            if CONFIG["extra_cond3"] is not None:
+                extra_cond3 = batch["extra_cond3_images"].to(CONFIG["device"], dtype=weight_dtype)
+            else:
+                extra_cond3 = None
 
             # 运行推理
-            result = run_inference(
+            result = run_inference_2(
                 unet=unet,
                 vae=vae,
                 noise_scheduler=noise_scheduler,
@@ -190,9 +187,10 @@ def run_inference_on_test_dataset(test_data_root):
                 condition_image=condition_images,
                 cloth_warp_image=cloth_warp_images,
                 cloth_warp_mask=cloth_warp_masks,
-                openpose_image=openpose_images,
-                canny_image=canny_images,
-                latent_append_num=CONFIG["latent_append_num"],
+                extra_cond1=extra_cond1,
+                extra_cond2=extra_cond2,
+                extra_cond3=extra_cond3,
+                use_warp_as_condition=CONFIG["use_warp_as_condition"],
             )
 
             for i in range(len(result)):

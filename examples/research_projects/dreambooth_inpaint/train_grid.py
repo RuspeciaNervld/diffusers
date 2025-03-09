@@ -20,7 +20,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-from catvton_base_infer import run_inference_2
+from train_grid_infer import run_inference_2
 import json
 from unet_adapter import adapt_unet_with_catvton_attn
 import lpips
@@ -38,7 +38,7 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
-from catvton_base_infer import prepare_image, prepare_mask_image
+from train_grid_infer import prepare_image, prepare_mask_image
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -606,6 +606,10 @@ def save_model(args, global_step, unet, accelerator, is_final=False):
         "use_warp_cloth": args.use_warp_cloth,
         "condition_image_drop_out": args.condition_image_drop_out,
         "cloth_warp_drop_out": args.cloth_warp_drop_out,
+        "other_loss_type": args.other_loss_type,
+        "other_loss_weight": args.other_loss_weight,
+        "use_warp_as_condition": args.use_warp_as_condition,
+        "use_origin_condition": args.use_origin_condition,
         "extra_cond1": args.extra_cond1,
         "extra_cond2": args.extra_cond2,
         "extra_cond3": args.extra_cond3,
@@ -1091,48 +1095,35 @@ def main():
                 masked_real_images_latents = vae.encode(masked_real_images.to(dtype=weight_dtype)).latent_dist.sample()
                 masked_real_images_latents = masked_real_images_latents * vae.config.scaling_factor
 
-                # 根据latent_append_num决定拼接方式
-                if args.use_warp_as_condition:
-                    if args.use_origin_condition:
-                        latents_to_concat = [real_image_latents, condition_image_latents, masked_part_latents]
-                        masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
-                                        torch.zeros_like(mask_latent),
-                                        torch.zeros_like(mask_latent)]
-                        masked_latents_to_concat = [masked_real_images_latents, condition_image_latents, masked_part_latents]
-                    else:
-                        latents_to_concat = [real_image_latents, masked_part_latents]
-                        masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
-                                        torch.zeros_like(mask_latent)]
-                        masked_latents_to_concat = [masked_real_images_latents, masked_part_latents]
-                else:
-                    if args.use_origin_condition:
-                        latents_to_concat = [real_image_latents, condition_image_latents]
-                        masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest"),
-                                        torch.zeros_like(mask_latent)]
-                        masked_latents_to_concat = [masked_part_latents, condition_image_latents]
-                    else:
-                        latents_to_concat = [real_image_latents]
-                        masks_to_concat = [mask_latent := torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest")]
-                        masked_latents_to_concat = [masked_part_latents]
+                mask_latent = torch.nn.functional.interpolate(real_masks_batch, size=real_image_latents.shape[-2:], mode="nearest")
+
+                latents_to_concat_1 = [real_image_latents, condition_image_latents]
+                masks_to_concat_1 = [mask_latent, torch.zeros_like(mask_latent)]
+                masked_latents_to_concat_1 = [masked_real_images_latents, condition_image_latents]
 
 
-                if "extra_cond1" in args and args.extra_cond1 is not None:
-                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
-                    masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
-                if "extra_cond2" in args and args.extra_cond2 is not None:
-                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond2_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
-                    masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond2_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
-                if "extra_cond3" in args and args.extra_cond3 is not None:
-                    latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond3_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
-                    masks_to_concat.append(torch.zeros_like(mask_latent))
-                    masked_latents_to_concat.append(vae.encode(prepare_image(batch["extra_cond3_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample())
+                # latents_to_concat_2 = [masked_part_latents,extra_cond1_latents:=vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample()]
+                # masks_to_concat_2 = [torch.zeros_like(mask_latent),torch.zeros_like(mask_latent)]
+                # masked_latents_to_concat_2 = [masked_part_latents, extra_cond1_latents]
 
-                # 拼接所有latents
-                latent_model_input_p1 = torch.cat(latents_to_concat, dim=-2)
-                mask_latent_concat = torch.cat(masks_to_concat, dim=-2)
-                masked_latent_concat = torch.cat(masked_latents_to_concat, dim=-2)
+                # 12维反转
+                latents_to_concat_2 = [extra_cond1_latents:=vae.encode(prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)).latent_dist.sample(),masked_part_latents]
+                masks_to_concat_2 = [torch.zeros_like(mask_latent),mask_latent]
+                masked_latents_to_concat_2 = [extra_cond1_latents, masked_part_latents]
+
+
+                # 拼接latents
+                latent_model_input_p1_1 = torch.cat(latents_to_concat_1, dim=-2)
+                mask_latent_concat_1 = torch.cat(masks_to_concat_1, dim=-2)
+                masked_latent_concat_1 = torch.cat(masked_latents_to_concat_1, dim=-2)
+
+                latent_model_input_p1_2 = torch.cat(latents_to_concat_2, dim=-2)
+                mask_latent_concat_2 = torch.cat(masks_to_concat_2, dim=-2)
+                masked_latent_concat_2 = torch.cat(masked_latents_to_concat_2, dim=-2)
+
+                latent_model_input_p1 = torch.cat([latent_model_input_p1_1, latent_model_input_p1_2], dim=-1)
+                mask_latent_concat = torch.cat([mask_latent_concat_1, mask_latent_concat_2], dim=-1)
+                masked_latent_concat = torch.cat([masked_latent_concat_1, masked_latent_concat_2], dim=-1)
 
                 # 添加噪声
                 noise = torch.randn_like(latent_model_input_p1)
@@ -1158,7 +1149,8 @@ def main():
                 # print(f"num_appends: {num_appends}")
                 #! 注意这里先尝试一下全1，看看效果
                 # 扩展dream_weights
-                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] * num_appends, dim=-2)
+                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] , dim=-2)
+                dream_weights = torch.cat([dream_weights] + [torch.ones_like(dream_weights)] , dim=-1)
                 
                 # 改用Huber Loss（Smooth L1）
                 # loss =  F.smooth_l1_loss(noise_pred.float(), target.float(), reduction="none", beta=1.5)
