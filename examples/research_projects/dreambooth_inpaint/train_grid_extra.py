@@ -453,7 +453,11 @@ def parse_args():
         default=None,
         help="预训练的image encoder路径"
     )
-    
+    parser.add_argument(
+        "--reverse_right",
+        action="store_true",
+        help="是否把右边反向",
+    )
     parser.add_argument(
         "--predict_together",
         action="store_true",
@@ -673,6 +677,7 @@ def save_model(args, global_step, unet, accelerator, is_final=False, image_encod
         "image_encoder_lora_dropout": args.image_encoder_lora_dropout,
         "train_image_encoder": args.train_image_encoder,
         "predict_together": args.predict_together,
+        "reverse_right":args.reverse_right,
     }
     import json
     with open(os.path.join(save_path, "training_config.json"), "w") as f:
@@ -1108,6 +1113,7 @@ def main():
             extra_cond3=validation_extra_cond3_image,
             show_whole_image=True,
             predict_together = args.predict_together,
+            reverse_right = args.reverse_right,
         )[0]
         
         # 保存推理结果
@@ -1155,12 +1161,22 @@ def main():
                 masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
                 masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
                 masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
-                masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
-                
-                warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+                if args.reverse_right:
+                    masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
+                else:
+                    masks_2_reverse = masks_2
+
+                #! 把底图去掉试试
+                # warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+                warped_masked_real_images_1 =  (cloth_warp_images * (cloth_warp_masks >= 0.5))
                 #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
-                warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
-                warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+                if args.reverse_right:
+                    warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+                    warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+                else:
+                    warped_masked_real_images_2 = torch.cat([warped_masked_real_images_1,extra_cond1_images], dim=-2)
+                    warped_masked_real_images_2_target = torch.cat([real_images,extra_cond1_images], dim=-2)
+
 
                 if args.predict_together:
                     real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2_target], dim=-1)
@@ -1310,6 +1326,7 @@ def main():
                             extra_cond3=validation_extra_cond3_image,
                             show_whole_image=True,
                             predict_together = args.predict_together,
+                            reverse_right = args.reverse_right,
                         )[0]
 
                     # 保存验证图片
