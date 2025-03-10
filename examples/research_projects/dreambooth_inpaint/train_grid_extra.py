@@ -453,7 +453,12 @@ def parse_args():
         default=None,
         help="预训练的image encoder路径"
     )
-
+    
+    parser.add_argument(
+        "--predict_together",
+        action="store_true",
+        help="是否一同预测",
+    )
     
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
@@ -667,6 +672,7 @@ def save_model(args, global_step, unet, accelerator, is_final=False, image_encod
         "image_encoder_lora_alpha": args.image_encoder_lora_alpha,
         "image_encoder_lora_dropout": args.image_encoder_lora_dropout,
         "train_image_encoder": args.train_image_encoder,
+        "predict_together": args.predict_together,
     }
     import json
     with open(os.path.join(save_path, "training_config.json"), "w") as f:
@@ -1101,6 +1107,7 @@ def main():
             extra_cond2=validation_extra_cond2_image,
             extra_cond3=validation_extra_cond3_image,
             show_whole_image=True,
+            predict_together = args.predict_together,
         )[0]
         
         # 保存推理结果
@@ -1155,17 +1162,24 @@ def main():
                 warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
                 warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
 
-                #! 这里可以是warped_masked_real_images_2，也可以是warped_masked_real_images_2_target，取决于想不想让warp部分也预测
-                real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
+                if args.predict_together:
+                    real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2_target], dim=-1)
+                else:
+                    real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
                 masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
-                #! 如果上面用了warped_masked_real_images_2_target，这里mask需要选下面一个
-                masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
-                # masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
+                if args.predict_together:
+                    masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
+                else:
+                    masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
+
+                #! 可以在第一格dream，也可以同时dream，这里是第一格dream
+                dream_mask = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
                 
                 # VAE编码基础输入
                 real_image_latents = vae.encode(real_images_4).latent_dist.sample()
                 masked_real_images_latents = vae.encode(masked_real_images_4).latent_dist.sample()
                 mask_latent = torch.nn.functional.interpolate(masks_4, size=real_image_latents.shape[-2:], mode="nearest")
+                dream_mask_latent = torch.nn.functional.interpolate(dream_mask, size=real_image_latents.shape[-2:], mode="nearest")
 
                 # 添加噪声
                 noise = torch.randn_like(real_image_latents)
@@ -1187,7 +1201,7 @@ def main():
                 # 计算DREAM损失
                 target = noise
                 # 确保mask_latent的维度与noise_pred匹配
-                dream_weights = 1.0 + (args.dream_lambda - 1.0) * mask_latent
+                dream_weights = 1.0 + (args.dream_lambda - 1.0) * dream_mask_latent
                 
                 # 改用Huber Loss（Smooth L1）
                 # loss =  F.smooth_l1_loss(noise_pred.float(), target.float(), reduction="none", beta=1.5)
@@ -1295,6 +1309,7 @@ def main():
                             extra_cond2=validation_extra_cond2_image,
                             extra_cond3=validation_extra_cond3_image,
                             show_whole_image=True,
+                            predict_together = args.predict_together,
                         )[0]
 
                     # 保存验证图片

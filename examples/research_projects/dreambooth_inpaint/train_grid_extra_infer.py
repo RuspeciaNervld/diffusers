@@ -142,6 +142,7 @@ def run_inference_2(
     generator=None,
     eta=1.0,
     show_whole_image:bool = False,
+    predict_together:bool = False,
     **kwargs
 ):
     # 打印推理参数，重点是用哪些latent
@@ -173,12 +174,15 @@ def run_inference_2(
     warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
     warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
 
-    #! 这里可以是warped_masked_real_images_2，也可以是warped_masked_real_images_2_target，取决于想不想让warp部分也预测
-    real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
+    if predict_together:
+        real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2_target], dim=-1)
+    else:
+        real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
     masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
-    #! 如果上面用了warped_masked_real_images_2_target，这里mask需要选下面一个
-    masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
-    # masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
+    if predict_together:
+        masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
+    else:
+        masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
     
     # VAE编码基础输入
     real_image_latents = compute_vae_encodings(real_images_4, vae)
