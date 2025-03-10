@@ -68,14 +68,9 @@ def prepare_image(image):
             image = image.unsqueeze(0)
         image = image.to(dtype=torch.float32)
 
-        # 如果像素值在0-1之间，则乘以255
         if image.min() >= 0 and image.max() <= 1:
-            image = image * 255.0
-        # 如果像素值在0-255之间，则除以127.5
-        if image.min() >= 0 and image.max() <= 255:
-            image = image.to(dtype=torch.float32) / 127.5 - 1.0
-        else:
-            image = image.to(dtype=torch.float32)
+            # print("image.min() >= 0 and image.max() <= 1")
+            image = image / 2 - 1.0
 
     else:
         # preprocess image
@@ -127,36 +122,6 @@ def prepare_mask_image(mask_image):
     return mask_image
 
 
-def prepare_masked_image_tensor(image, mask, device = 'cuda', weight_dtype=torch.float32) -> torch.Tensor:
-    real_images = prepare_image(image).to(device=device, dtype=weight_dtype)
-    real_masks = prepare_image(mask).to(device=device, dtype=weight_dtype)
-    
-    # 把mask转为单通道
-    real_masks = real_masks[:, 0:1, :, :]
-
-    # 准备masked_image
-    masked_real_images = real_images * (real_masks < 0.5)
-    return masked_real_images
-
-def prepare_warpped_masked_image_tensor(image, mask, cloth_warp_image, cloth_warp_mask, device = 'cuda', weight_dtype=torch.float32) -> torch.Tensor:
-    real_images = prepare_image(image).to(device=device, dtype=weight_dtype)
-    real_masks = prepare_image(mask).to(device=device, dtype=weight_dtype)
-    cloth_warp_images = prepare_image(cloth_warp_image).to(device=device, dtype=weight_dtype)
-    cloth_warp_masks = prepare_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
-    
-    # 把mask转为单通道
-    real_masks = real_masks[:, 0:1, :, :]
-    cloth_warp_masks = cloth_warp_masks[:, 0:1, :, :]
-    
-    # 准备masked_image
-    masked_real_images = real_images * (real_masks < 0.5)
-    
-    # 将cloth_warp_images通过cloth_warp_masks贴到masked_real_images上
-    cloth_warp_part = cloth_warp_images * (cloth_warp_masks >= 0.5)
-    masked_part = masked_real_images + cloth_warp_part
-    
-    return masked_part
-
 @torch.no_grad()
 def run_inference_2(
     unet,
@@ -187,6 +152,7 @@ def run_inference_2(
     vae.to(device)
 
     # 准备基础输入
+    print("预测阶段准备基础输入")
     real_images = prepare_image(image).to(device=device, dtype=weight_dtype)
     real_masks = prepare_mask_image(mask).to(device=device, dtype=weight_dtype)
     condition_images = prepare_image(condition_image).to(device=device, dtype=weight_dtype)

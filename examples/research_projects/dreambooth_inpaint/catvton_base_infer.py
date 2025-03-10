@@ -68,14 +68,9 @@ def prepare_image(image):
             image = image.unsqueeze(0)
         image = image.to(dtype=torch.float32)
 
-        # # 如果像素值在0-1之间，则乘以255
-        # if image.min() >= 0 and image.max() <= 1:
-        #     image = image * 255.0
-        # # 如果像素值在0-255之间，则除以127.5
-        # if image.min() >= 0 and image.max() <= 255:
-        #     image = image.to(dtype=torch.float32) / 127.5 - 1.0
-        # else:
-        #     image = image.to(dtype=torch.float32)
+        if image.min() >= 0 and image.max() <= 1:
+            # print("image.min() >= 0 and image.max() <= 1")
+            image = image / 2 - 1.0
 
     else:
         # preprocess image
