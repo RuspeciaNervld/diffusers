@@ -161,6 +161,7 @@ def prepare_warpped_masked_image_tensor(image, mask, cloth_warp_image, cloth_war
 def run_inference_2(
     unet,
     vae,
+    image_encoder,
     noise_scheduler,
     device='cuda',
     weight_dtype=torch.float32,
@@ -203,19 +204,31 @@ def run_inference_2(
     masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
     masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
     masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
+    masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
     
     warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
-    #! 先尝试上面是extra_cond1_images，下面是warped_masked
+    #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
     warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+    warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
 
+    #! 这里可以是warped_masked_real_images_2，也可以是warped_masked_real_images_2_target，取决于想不想让warp部分也预测
     real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
     masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
+    #! 如果上面用了warped_masked_real_images_2_target，这里mask需要选下面一个
     masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
+    # masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
     
     # VAE编码基础输入
     real_image_latents = compute_vae_encodings(real_images_4, vae)
     masked_real_images_latents = compute_vae_encodings(masked_real_images_4, vae)
     mask_latent = torch.nn.functional.interpolate(masks_4, size=real_image_latents.shape[-2:], mode="nearest")
+
+    if image_encoder is not None:
+        image_encoder.eval()
+        image_hidden_states = image_encoder(condition_images)
+        # print(image_hidden_states.shape)
+        # print("image_encoder.show_trainable_params()")
+        # image_encoder.show_trainable_params()
 
     if do_classifier_free_guidance := (guidance_scale > 1.0):
         # uncond_real_images_2 = torch.cat([masked_real_images_1, torch.zeros_like(condition_images)], dim=-2)
@@ -225,12 +238,13 @@ def run_inference_2(
         uncond_masked_real_images_2 = torch.cat([masked_real_images_1, torch.full_like(condition_images, -1.0)], dim=-2)
         uncond_masked_real_images_4 = torch.cat([uncond_masked_real_images_2, torch.full_like(uncond_masked_real_images_2,-1.0)], dim=-1)
 
-        
         # uncond_real_image_latents = compute_vae_encodings(uncond_real_images_4, vae)
         uncond_masked_real_images_latents = compute_vae_encodings(uncond_masked_real_images_4, vae)
 
         masked_latent_concat = torch.cat([uncond_masked_real_images_latents, masked_real_images_latents])
         mask_latent_concat = torch.cat([mask_latent] * 2)
+
+        uncond_image_hidden_states = torch.zeros_like(image_hidden_states)
 
     # 准备初始噪声
     latents = randn_tensor(
@@ -254,13 +268,21 @@ def run_inference_2(
     with tqdm.tqdm(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
             non_inpainting_latent_model_input = (torch.cat([latents] * 2) if do_classifier_free_guidance else latents)
+            image_hidden_states_final = (torch.cat([image_hidden_states ,uncond_image_hidden_states] ) if do_classifier_free_guidance else image_hidden_states)
             non_inpainting_latent_model_input = noise_scheduler.scale_model_input(non_inpainting_latent_model_input, t)
             inpainting_latent_model_input = torch.cat([non_inpainting_latent_model_input, mask_latent_concat, masked_latent_concat], dim=1)
             
+            # print("inpainting_latent_model_input.shape", inpainting_latent_model_input.shape)
+            # print("image_hidden_states.shape", image_hidden_states.shape)
+            # print("image_hidden_states_final.shape", image_hidden_states_final.shape)
+            # print("non_inpainting_latent_model_input.shape", non_inpainting_latent_model_input.shape)
+            # print("mask_latent_concat.shape", mask_latent_concat.shape)
+            # print("masked_latent_concat.shape", masked_latent_concat.shape)
+
             noise_pred = unet(
                 inpainting_latent_model_input,
                 t.to(device),
-                encoder_hidden_states=None,
+                encoder_hidden_states=image_hidden_states_final,
                 return_dict=False,
             )[0]
             
@@ -275,7 +297,8 @@ def run_inference_2(
 
     # 解码最终的潜变量（只取real_images对应的部分）
     if not show_whole_image:
-        latents = latents.split(latents.shape[-2] // total_latent_num, dim=-2)[0]  # 根据latent_append_num来分割
+        latents = latents.split(latents.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
+        latents = latents.split(latents.shape[-1] // 2, dim=-1)[0]  # 根据latent_append_num来分割
     latents = 1 / vae.config.scaling_factor * latents
     image = vae.decode(latents.to(vae.device, dtype=vae.dtype)).sample
     image = (image / 2 + 0.5).clamp(0, 1)

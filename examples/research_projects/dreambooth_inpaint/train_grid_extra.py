@@ -447,6 +447,12 @@ def parse_args():
         default=0.0,
         help="image encoder的lora dropout"
     )
+    parser.add_argument(
+        "--pretrained_image_encoder_path",
+        type=str,
+        default=None,
+        help="预训练的image encoder路径"
+    )
 
     
     args = parser.parse_args()
@@ -607,7 +613,7 @@ def get_parameter_stats(model):
     return total_params, trainable_params
 
 
-def save_model(args, global_step, unet, accelerator, is_final=False):
+def save_model(args, global_step, unet, accelerator, is_final=False, image_encoder =None):
     """只保存可训练参数的检查点"""
     if not accelerator.is_main_process:
         return
@@ -623,6 +629,10 @@ def save_model(args, global_step, unet, accelerator, is_final=False):
         for name, param in unwrapped_unet.named_parameters()
         if param.requires_grad
     }
+
+    if image_encoder is not None:
+        unwrapped_image_encoder = accelerator.unwrap_model(image_encoder)
+        unwrapped_image_encoder.save_pretrained(os.path.join(save_path, "image_encoder.pt"))
     
     # 使用safetensors保存
     from safetensors.torch import save_file
@@ -651,6 +661,12 @@ def save_model(args, global_step, unet, accelerator, is_final=False):
         "extra_cond1": args.extra_cond1,
         "extra_cond2": args.extra_cond2,
         "extra_cond3": args.extra_cond3,
+        "pretrained_clip_model_path": args.pretrained_clip_model_path,
+        "pretrained_image_encoder_path": args.pretrained_image_encoder_path,
+        "image_encoder_lora_r": args.image_encoder_lora_r,
+        "image_encoder_lora_alpha": args.image_encoder_lora_alpha,
+        "image_encoder_lora_dropout": args.image_encoder_lora_dropout,
+        "train_image_encoder": args.train_image_encoder,
     }
     import json
     with open(os.path.join(save_path, "training_config.json"), "w") as f:
@@ -809,19 +825,32 @@ def main():
     # ! 使用stabilityai/sd-vae-ft-mse作为vae
     vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
     unet = UNet2DConditionModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="unet")
-    image_encoder = CLIPPeftModel(
-        clip_model_name='ViT-B/32',
-        checkpoint_path=args.pretrained_clip_model_path,
-        lora_r=args.image_encoder_lora_r,
-        lora_alpha=args.image_encoder_lora_alpha,
-        lora_dropout=args.image_encoder_lora_dropout,
-        lora_trainable_modules=["all","in_proj","out_proj"]
-    )
+
+    if args.pretrained_image_encoder_path:
+        image_encoder = CLIPPeftModel.from_pretrained(base_model_path=args.pretrained_clip_model_path,
+                                                      finetune_path=args.pretrained_image_encoder_path)
+        print("加载预训练image encoder成功")
+    else:
+        image_encoder = CLIPPeftModel(
+            clip_model_name='ViT-B/32',
+            checkpoint_path=args.pretrained_clip_model_path,
+            lora_r=args.image_encoder_lora_r,
+            lora_alpha=args.image_encoder_lora_alpha,
+            lora_dropout=args.image_encoder_lora_dropout,
+            lora_trainable_modules=["all","in_proj","out_proj"]
+        )
+
     image_encoder.to(accelerator.device)
     if args.train_image_encoder:
         image_encoder.train()
+        image_encoder.train_mode()
     else:
         image_encoder.eval()
+        image_encoder.eval_mode()
+
+    print("1111111 image_encoder.show_trainable_params()")
+    image_encoder.show_trainable_params()
+    print("1111111 end of image_encoder.show_trainable_params()")
 
     attn_modules = adapt_unet_with_catvton_attn(
         unet = unet,
@@ -1057,6 +1086,7 @@ def main():
         result = run_inference_2(
             unet=accelerator.unwrap_model(unet),
             vae=vae,
+            image_encoder=accelerator.unwrap_model(image_encoder),
             noise_scheduler=noise_scheduler,
             device=accelerator.device,
             weight_dtype=weight_dtype,
@@ -1093,7 +1123,8 @@ def main():
                     progress_bar.update(1)
                 continue
 
-            with accelerator.accumulate(unet):
+                
+            with accelerator.accumulate(unet, image_encoder):
                 # 基础输入处理
                 real_images = prepare_image(batch["real_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 real_masks = prepare_mask_image(batch["real_masks"]).to(device=accelerator.device, dtype=weight_dtype)
@@ -1117,14 +1148,19 @@ def main():
                 masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
                 masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
                 masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
+                masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
                 
                 warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
-                #! 先尝试上面是extra_cond1_images，下面是warped_masked
+                #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
                 warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+                warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
 
+                #! 这里可以是warped_masked_real_images_2，也可以是warped_masked_real_images_2_target，取决于想不想让warp部分也预测
                 real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2], dim=-1)
                 masked_real_images_4 = torch.cat([masked_real_images_2, warped_masked_real_images_2], dim=-1)
+                #! 如果上面用了warped_masked_real_images_2_target，这里mask需要选下面一个
                 masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
+                # masks_4 = torch.cat([masks_2, masks_2_reverse], dim=-1)
                 
                 # VAE编码基础输入
                 real_image_latents = vae.encode(real_images_4).latent_dist.sample()
@@ -1207,7 +1243,7 @@ def main():
 
                 # 添加保存检查点的逻辑
                 if args.save_steps is not None and global_step % args.save_steps == 0:
-                    save_model(args, global_step, unet, accelerator)
+                    save_model(args, global_step, unet, accelerator, image_encoder=image_encoder)
 
                 # 添加验证步骤
                 if args.validation_steps is not None and global_step % args.validation_steps == 0 and accelerator.is_main_process:
@@ -1244,6 +1280,7 @@ def main():
                         result = run_inference_2(
                             unet=accelerator.unwrap_model(unet),
                             vae=vae,
+                            image_encoder=accelerator.unwrap_model(image_encoder),
                             noise_scheduler=noise_scheduler,
                             device=accelerator.device,
                             weight_dtype=weight_dtype,
@@ -1279,7 +1316,7 @@ def main():
 
     # 在训练结束时保存最终模型
     if accelerator.is_main_process:
-        save_model(args, global_step, unet, accelerator, is_final=True)
+        save_model(args, global_step, unet, accelerator, is_final=True, image_encoder=image_encoder)
 
 
 if __name__ == "__main__":

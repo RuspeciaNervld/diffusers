@@ -17,17 +17,17 @@ warp基础上重绘 + 使用条件图片
 --image_encoder_lora_trainable_modules "all" \
 
 python examples/research_projects/dreambooth_inpaint/train_grid_extra.py \
-  --use_warp_cloth  --cloth_warp_drop_out 0.1  --use_warp_as_condition \
+  --use_warp_cloth  --cloth_warp_drop_out 0.3  --use_warp_as_condition \
   --use_origin_condition\
-  --condition_image_drop_out 0.0 \
-  --extra_cond1_drop_out 0.0 \
+  --condition_image_drop_out 0.1 \
+  --extra_cond1_drop_out 0.1 \
   --train_image_encoder \
   --extra_cond1 "/mnt/pub_data/vton/detail_images_2" \
-  --other_loss_weight 0.5 --other_loss_type mse \
-  --train_batch_size=4 --gradient_accumulation_steps=4 --learning_rate=1e-6 --max_train_steps=16000 \
-  --dream_lambda 2 \
-  --validation_steps 50 \
-  --save_steps 200 \
+  --other_loss_weight 0.5 --other_loss_type lpips \
+  --train_batch_size=2 --gradient_accumulation_steps=2 --learning_rate=1e-7 --max_train_steps=16000 \
+  --dream_lambda 10 \
+  --validation_steps 100 \
+  --save_steps 500 \
   --validation_root_dir "/mnt/pub_data/vton_test_small" \
   --pretrained_model_name_or_path="/mnt/pub_data/booksforcharlie-stable-diffusion-inpainting" \
   --instance_data_dir="/mnt/pub_data/vton" \
@@ -37,7 +37,9 @@ python examples/research_projects/dreambooth_inpaint/train_grid_extra.py \
   --use_8bit_adam \
   --trainable_modules "attention" \
   --catvton_attn_path="/mnt/pub_data/catvton_unet_attn" \
-  --resume_from_checkpoint "/mnt/pub_data/train_output/0309_1601/step-1200" \
+  --pretrained_clip_model_path="/mnt/pub_data/models/finetuned_clip.pt" \
+  --pretrained_image_encoder_path="/mnt/pub_data/train_output/0310_1317 小批量，过拟合，有概率抄作业/step-1500/image_encoder.pt" \
+  --resume_from_checkpoint "/mnt/pub_data/train_output/0310_1317 小批量，过拟合，有概率抄作业/step-1500" \
 
   --gradient_checkpointing \
   --valid_cloth_warp_image "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_images/00391_00.jpg" \

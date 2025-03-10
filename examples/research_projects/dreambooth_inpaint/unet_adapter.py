@@ -136,85 +136,14 @@ def init_adapter(unet,
                 # retain the original attn processor
                 attn_procs[name] = AttnProcessor2_0(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
         else:
-            attn_procs[name] = cross_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
-                                                    
+            if not name.startswith("up_blocks"):
+                attn_procs[name] = cross_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
+            else:
+                attn_procs[name] = AttnProcessor2_0(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
+
     unet.set_attn_processor(attn_procs)
     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
     return adapter_modules
-
-# def init_adapter_v2(
-#     unet, 
-#     self_attn_cls=SkipAttnProcessor,  # 自注意力默认处理器
-#     cross_attn_cls=DualAttnProcessor,  # 交叉注意力自定义处理器
-#     activate_blocks=["mid_block", "up_blocks"],
-#     **kwargs
-# ):
-#     if cross_attn_dim is None:
-#         cross_attn_dim = unet.config.cross_attention_dim
-#     attn_procs = {}
-#     for name in unet.attn_processors.keys():
-#         # 判断是否为上采样阶段的交叉注意力层
-#         is_up_cross = (
-#             name.startswith(tuple(activate_blocks)) and 
-#             "attn2" in name and 
-#             "up_blocks" in name
-#         )
-#         # 配置特殊参数给上采样交叉注意力层
-#         if is_up_cross:
-#             attn_procs[name] = cross_attn_cls(
-#                 hidden_size=list(reversed(unet.config.block_out_channels))[
-#                     int(name.split(".")[1]) # 获取block_id
-#                 ],
-#                 text_cross_dim=cross_attn_dim,
-#                 image_cond_dim=image_cond_dim,  # 传递图像编码维度
-#                 **kwargs
-#             )
-#         else: 
-#             cross_attention_dim = None if name.endswith("attn1.processor") else cross_attn_dim
-#             if name.startswith("mid_block"):
-#                 hidden_size = unet.config.block_out_channels[-1]
-#             elif name.startswith("up_blocks"):
-#                 block_id = int(name[len("up_blocks.")])
-#                 hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-#             elif name.startswith("down_blocks"):
-#                 block_id = int(name[len("down_blocks.")])
-#                 hidden_size = unet.config.block_out_channels[block_id]
-#             if cross_attention_dim is None:
-#                 if self_attn_cls is not None:
-#                     attn_procs[name] = self_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
-#                 else:
-#                     # retain the original attn processor
-#                     attn_procs[name] = AttnProcessor2_0(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
-#             else:
-#                 attn_procs[name] = cross_attn_cls(hidden_size=hidden_size, cross_attention_dim=cross_attention_dim, **kwargs)
-                                                        
-#     unet.set_attn_processor(attn_procs)
-#     adapter_modules = torch.nn.ModuleList(unet.attn_processors.values())
-#     return adapter_modules
-
-#     # 遍历所有注意力层
-#     for name in unet.attn_processors.keys():
-
-#         # 交叉注意力层配置（仅在后半部分）
-#         elif "attn2" in name and any([name.startswith(b) for b in activate_blocks]):
-#             # 获取隐藏层维度
-#             if name.startswith("mid_block"):
-#                 hidden_size = unet.config.block_out_channels[-1]
-#             else:
-#                 block_id = int(name.split(".")[1])
-#                 hidden_size = unet.config.block_out_channels[-(block_id+1)]
-            
-#             # 初始化双处理器
-#             attn_procs[name] = cross_attn_cls(
-#                 hidden_size=hidden_size,
-#                 cross_attention_dim=unet.config.cross_attention_dim
-#             )
-#         else:
-#             # 保留原始处理器
-#             attn_procs[name] = unet.attn_processors[name]
-    
-#     unet.set_attn_processor(attn_procs)
-#     return unet
 
 # ! 加载catvton的attention权重
 def get_trainable_module(unet, trainable_module_name):
