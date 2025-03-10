@@ -70,7 +70,7 @@ def prepare_image(image):
 
         if image.min() >= 0 and image.max() <= 1:
             # print("image.min() >= 0 and image.max() <= 1")
-            image = image / 2 - 1.0
+            image = image * 2 - 1.0
 
     else:
         # preprocess image
@@ -143,6 +143,7 @@ def run_inference_2(
     eta=1.0,
     show_whole_image:bool = False,
     predict_together:bool = False,
+    reverse_right:bool = True,
     **kwargs
 ):
     # 打印推理参数，重点是用哪些latent
@@ -167,12 +168,21 @@ def run_inference_2(
     masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
     masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
     masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
-    masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
+    if reverse_right:
+        masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
+    else:
+        masks_2_reverse = masks_2
     
-    warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+    #! 把底图去掉试试
+    # warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
+    warped_masked_real_images_1 =  (cloth_warp_images * (cloth_warp_masks >= 0.5))
     #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
-    warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
-    warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+    if reverse_right:
+        warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
+        warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+    else:
+        warped_masked_real_images_2 = torch.cat([warped_masked_real_images_1,extra_cond1_images], dim=-2)
+        warped_masked_real_images_2_target = torch.cat([real_images,extra_cond1_images], dim=-2)
 
     if predict_together:
         real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2_target], dim=-1)

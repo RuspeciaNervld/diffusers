@@ -70,7 +70,7 @@ def prepare_image(image):
 
         if image.min() >= 0 and image.max() <= 1:
             # print("image.min() >= 0 and image.max() <= 1")
-            image = image / 2 - 1.0
+            image = image * 2 - 1.0
 
     else:
         # preprocess image

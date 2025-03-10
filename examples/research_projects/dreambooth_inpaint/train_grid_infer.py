@@ -69,7 +69,7 @@ def prepare_image(image):
         image = image.to(dtype=torch.float32)
 
         if image.min() >= 0 and image.max() <= 1:
-            image = image / 2 - 1.0
+            image = image * 2 - 1.0
 
     else:
         # preprocess image
