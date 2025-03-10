@@ -68,14 +68,14 @@ def prepare_image(image):
             image = image.unsqueeze(0)
         image = image.to(dtype=torch.float32)
 
-        # # 如果像素值在0-1之间，则乘以255
-        # if image.min() >= 0 and image.max() <= 1:
-        #     image = image * 255.0
-        # # 如果像素值在0-255之间，则除以127.5
-        # if image.min() >= 0 and image.max() <= 255:
-        #     image = image.to(dtype=torch.float32) / 127.5 - 1.0
-        # else:
-        #     image = image.to(dtype=torch.float32)
+        # 如果像素值在0-1之间，则乘以255
+        if image.min() >= 0 and image.max() <= 1:
+            image = image * 255.0
+        # 如果像素值在0-255之间，则除以127.5
+        if image.min() >= 0 and image.max() <= 255:
+            image = image.to(dtype=torch.float32) / 127.5 - 1.0
+        else:
+            image = image.to(dtype=torch.float32)
 
     else:
         # preprocess image
@@ -170,12 +170,8 @@ def run_inference_2(
     condition_image: Union[torch.Tensor, Image.Image]=None,  # condition_images
     cloth_warp_image: Union[torch.Tensor, Image.Image]=None,  # cloth_warp_images
     cloth_warp_mask: Union[torch.Tensor, Image.Image]=None,  # cloth_warp_masks
-    use_warp_as_condition: bool = False,
-    use_origin_condition: bool = True,
     # 除了上面的是必须存在的，下面的根据需要拼接
     extra_cond1: Union[torch.Tensor, Image.Image]=None,  # extra_condition_images
-    extra_cond2: Union[torch.Tensor, Image.Image]=None,  # extra_condition_images
-    extra_cond3: Union[torch.Tensor, Image.Image]=None,  # extra_condition_images
     num_inference_steps: int = 50,
     guidance_scale: float = 2.5,
     generator=None,
@@ -271,13 +267,6 @@ def run_inference_2(
             image_hidden_states_final = (torch.cat([image_hidden_states ,uncond_image_hidden_states] ) if do_classifier_free_guidance else image_hidden_states)
             non_inpainting_latent_model_input = noise_scheduler.scale_model_input(non_inpainting_latent_model_input, t)
             inpainting_latent_model_input = torch.cat([non_inpainting_latent_model_input, mask_latent_concat, masked_latent_concat], dim=1)
-            
-            # print("inpainting_latent_model_input.shape", inpainting_latent_model_input.shape)
-            # print("image_hidden_states.shape", image_hidden_states.shape)
-            # print("image_hidden_states_final.shape", image_hidden_states_final.shape)
-            # print("non_inpainting_latent_model_input.shape", non_inpainting_latent_model_input.shape)
-            # print("mask_latent_concat.shape", mask_latent_concat.shape)
-            # print("masked_latent_concat.shape", masked_latent_concat.shape)
 
             noise_pred = unet(
                 inpainting_latent_model_input,
@@ -294,13 +283,13 @@ def run_inference_2(
             
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % noise_scheduler.order == 0):
                 progress_bar.update()
-
-    # 解码最终的潜变量（只取real_images对应的部分）
-    if not show_whole_image:
-        latents = latents.split(latents.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
-        latents = latents.split(latents.shape[-1] // 2, dim=-1)[0]  # 根据latent_append_num来分割
+    
     latents = 1 / vae.config.scaling_factor * latents
     image = vae.decode(latents.to(vae.device, dtype=vae.dtype)).sample
+    # 最终的图像，只取real_images对应的部分
+    if not show_whole_image:
+        image = image.split(image.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
+        image = image.split(image.shape[-1] // 2, dim=-1)[0]  # 根据latent_append_num来分割
     image = (image / 2 + 0.5).clamp(0, 1)
     
     # 转换为PIL图像
