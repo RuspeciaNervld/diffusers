@@ -20,7 +20,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
-from train_grid_extra_infer import run_inference_2
+from train_grid_extra_plus_infer import run_inference_2
 import json
 from unet_adapter import adapt_unet_with_catvton_attn
 import lpips
@@ -39,7 +39,7 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
-from train_grid_extra_infer import prepare_image, prepare_mask_image
+from train_grid_extra_plus_infer import prepare_image, prepare_mask_image, inverse_transform, adaptive_crop_with_margin
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -1111,7 +1111,7 @@ def main():
             extra_cond1=validation_extra_cond1_image,
             extra_cond2=validation_extra_cond2_image,
             extra_cond3=validation_extra_cond3_image,
-            show_whole_image=True,
+            show_whole_image=False,
             predict_together = args.predict_together,
             reverse_right = args.reverse_right,
         )[0]
@@ -1140,7 +1140,24 @@ def main():
             with accelerator.accumulate(unet, image_encoder):
                 # 基础输入处理
                 real_images = prepare_image(batch["real_images"]).to(device=accelerator.device, dtype=weight_dtype)
+                real_images_copy = real_images
                 real_masks = prepare_mask_image(batch["real_masks"]).to(device=accelerator.device, dtype=weight_dtype)
+                real_masks_copy = real_masks
+                real_images, params = adaptive_crop_with_margin(
+                    real_images, real_masks, 
+                    margin_ratio=0.05, 
+                    target_size=(512, 384)
+                )
+
+                real_masks, _ = adaptive_crop_with_margin(
+                    real_masks, real_masks, 
+                    margin_ratio=0.05, 
+                    target_size=(512, 384)
+                )
+
+                real_images = real_images.to(device=accelerator.device, dtype=weight_dtype)
+                real_masks = real_masks.to(device=accelerator.device, dtype=weight_dtype)
+
                 condition_images = prepare_image(batch["condition_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 cloth_warp_images = prepare_image(batch["cloth_warp_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 cloth_warp_masks = prepare_mask_image(batch["cloth_warp_masks"]).to(device=accelerator.device, dtype=weight_dtype)
@@ -1324,7 +1341,7 @@ def main():
                             extra_cond1=validation_extra_cond1_image,
                             extra_cond2=validation_extra_cond2_image,
                             extra_cond3=validation_extra_cond3_image,
-                            show_whole_image=True,
+                            show_whole_image=False,
                             predict_together = args.predict_together,
                             reverse_right = args.reverse_right,
                         )[0]

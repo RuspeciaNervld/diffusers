@@ -156,14 +156,36 @@ def run_inference_2(
     # 准备基础输入
     print("预测阶段准备基础输入")
     real_images = prepare_image(image).to(device=device, dtype=weight_dtype)
+    real_images_copy = real_images
     real_masks = prepare_mask_image(mask).to(device=device, dtype=weight_dtype)
+    real_masks_copy = real_masks
+
+    #! margin ratio
+    real_images, params = adaptive_crop_with_margin(
+        real_images, real_masks, 
+        margin_ratio=0.05, 
+        target_size=(512, 384)
+    )
+    print(real_images.shape)
+    
+    real_masks, _ = adaptive_crop_with_margin(
+        real_masks, real_masks, 
+        margin_ratio=0.05, 
+        target_size=(512, 384)
+    )
+    real_images = real_images.to(device=device, dtype=weight_dtype)
+    real_masks = real_masks.to(device=device, dtype=weight_dtype)
+
     condition_images = prepare_image(condition_image).to(device=device, dtype=weight_dtype)
     cloth_warp_images = prepare_image(cloth_warp_image).to(device=device, dtype=weight_dtype)
+    
+
     cloth_warp_masks = prepare_mask_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
     extra_cond1_images = prepare_image(extra_cond1).to(device=device, dtype=weight_dtype)
 
     # 在像素空间进行拼接
     # (B, 3, H, W)
+    print(condition_images.shape)
     real_images_2 = torch.cat([real_images, condition_images], dim=-2)
     masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
     masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
@@ -270,6 +292,19 @@ def run_inference_2(
     if not show_whole_image:
         image = image.split(image.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
         image = image.split(image.shape[-1] // 2, dim=-1)[0]  # 根据latent_append_num来分割
+        processed_images = image  # 假设处理后图像
+
+        # 逆变换还原
+        restored_images = inverse_transform(processed_images, params)
+
+        # 验证尺寸
+        print(f"原图尺寸: {real_images_copy.shape[2:]}")
+        print(f"处理后尺寸: {image.shape[2:]}")
+        print(f"还原后尺寸: {restored_images.shape[2:]}")
+
+        # 将还原后的图片通过mask贴到原图上
+        image = real_images_copy * (real_masks_copy < 0.5) + restored_images * (real_masks_copy >= 0.5)
+
     image = (image / 2 + 0.5).clamp(0, 1)
     
     # 转换为PIL图像
@@ -277,3 +312,105 @@ def run_inference_2(
     image = numpy_to_pil(image)
 
     return image
+
+import torch
+import torch.nn.functional as F
+
+def adaptive_crop_with_margin(real_images, real_masks, margin_ratio=0.1, target_size=(512, 384)):
+    """
+    带余量的mask自适应裁剪与缩放
+    Args:
+        real_images (Tensor): 输入图像 [B,C,H,W], 值域[0,1]
+        real_masks (Tensor): 二值mask [B,1,H,W], 值0/1
+        margin_ratio (float): 余量比例（相对于裁剪区域尺寸）
+        target_size (tuple): 目标缩放尺寸 (H, W)
+    Returns:
+        cropped_resized (Tensor): 裁剪缩放后的图像 [B,C,target_H,target_W]
+        transform_params (dict): 逆变换参数
+    """
+    device = real_images.device
+    B, C, H, W = real_images.shape
+    transform_params = []
+
+    # 初始化结果张量
+    cropped_resized = torch.zeros((B, C, target_size[0], target_size[1]), device=device)
+
+    for b in range(B):
+        # --- 步骤1：计算有效区域坐标 ---
+        mask = (real_masks[b,0] >= 0.5).float()  # 二值化 [H,W]
+        y_coords, x_coords = torch.where(mask == 1)
+        
+        if len(y_coords) == 0:  # 无mask情况处理
+            cropped_resized[b] = F.interpolate(real_images[b:b+1], size=target_size, mode='bilinear')[0]
+            transform_params.append(None)
+            continue
+
+        y_min, y_max = y_coords.min(), y_coords.max()
+        x_min, x_max = x_coords.min(), x_coords.max()
+
+        # --- 步骤2：计算扩展余量 ---
+        crop_h = y_max - y_min
+        crop_w = x_max - x_min
+        h_margin = int(crop_h * margin_ratio)
+        w_margin = int(crop_w * margin_ratio)
+
+        # 边界保护
+        y_start = max(0, y_min - h_margin)
+        y_end = min(H, y_max + h_margin)
+        x_start = max(0, x_min - w_margin)
+        x_end = min(W, x_max + w_margin)
+
+        # --- 步骤3：执行裁剪 ---
+        cropped = real_images[b:b+1, :, y_start:y_end, x_start:x_end]  # [1,C,h_crop,w_crop]
+        
+        # --- 步骤4：缩放至目标尺寸 ---
+        resized = F.interpolate(cropped, size=target_size, mode='bilinear', align_corners=False)
+        cropped_resized[b] = resized[0]
+
+        # --- 记录变换参数 ---
+        params = {
+            "original_shape": (H, W),
+            "crop_coords": (y_start, y_end, x_start, x_end),
+            "original_crop_size": (cropped.shape[2], cropped.shape[3]),
+            "target_size": target_size
+        }
+        transform_params.append(params)
+
+    return cropped_resized, transform_params
+
+def inverse_transform(processed_images, transform_params):
+    """
+    逆变换：将处理后的图像还原至原图位置
+    Args:
+        processed_images (Tensor): 处理后的图像 [B,C,target_H,target_W]
+        transform_params (list): 变换参数列表
+    Returns:
+        restored (Tensor): 还原后的图像 [B,C,original_H,original_W]
+    """
+    device = processed_images.device
+    B, C, _, _ = processed_images.shape
+    restored = torch.zeros((B, C, 
+                          transform_params[0]["original_shape"][0], 
+                          transform_params[0]["original_shape"][1]), device=device)
+
+    for b in range(B):
+        if transform_params[b] is None:
+            restored[b] = F.interpolate(processed_images[b:b+1], 
+                                      size=transform_params[b]["original_shape"], 
+                                      mode='bilinear')[0]
+            continue
+
+        # --- 逆缩放 ---
+        resized_back = F.interpolate(
+            processed_images[b:b+1], 
+            size=transform_params[b]["original_crop_size"],
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # --- 贴回原图位置 ---
+        y_start, y_end, x_start, x_end = transform_params[b]["crop_coords"]
+        restored[b:b+1, :, y_start:y_end, x_start:x_end] = resized_back
+
+    return restored
+
