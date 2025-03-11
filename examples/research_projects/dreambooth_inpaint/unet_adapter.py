@@ -164,6 +164,10 @@ def get_trainable_module(unet, trainable_module_name):
         for name, param in unet.named_modules():
             if "attn1" in name:
                 attn_blocks.append(param)
+        for name, param in unet.named_modules():
+            if name.startswith("up_blocks") and "attn2" in name:
+                print("加入一个上采样交叉注意力")
+                attn_blocks.append(param)
         return attn_blocks
     else:
         raise ValueError(f"Unknown trainable_module_name: {trainable_module_name}")
