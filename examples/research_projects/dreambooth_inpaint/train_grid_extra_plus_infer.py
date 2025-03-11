@@ -162,14 +162,14 @@ def run_inference_2(
 
     #! margin ratio
     real_images, params = adaptive_crop_with_margin(
-        real_images, real_masks, 
+        real_images, real_masks_copy, 
         margin_ratio=0.05, 
         target_size=(512, 384)
     )
     print(real_images.shape)
     
     real_masks, _ = adaptive_crop_with_margin(
-        real_masks, real_masks, 
+        real_masks, real_masks_copy, 
         margin_ratio=0.05, 
         target_size=(512, 384)
     )
@@ -178,9 +178,8 @@ def run_inference_2(
 
     condition_images = prepare_image(condition_image).to(device=device, dtype=weight_dtype)
     cloth_warp_images = prepare_image(cloth_warp_image).to(device=device, dtype=weight_dtype)
-    
-
     cloth_warp_masks = prepare_mask_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
+
     extra_cond1_images = prepare_image(extra_cond1).to(device=device, dtype=weight_dtype)
 
     # 在像素空间进行拼接
@@ -191,20 +190,21 @@ def run_inference_2(
     masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
     masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
     if reverse_right:
-        masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
+        masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks_copy], dim=-2)
     else:
-        masks_2_reverse = masks_2
+        masks_2_reverse = torch.cat([real_masks_copy, torch.zeros_like(real_masks)], dim=-2)
     
     #! 把底图去掉试试
-    # warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
-    warped_masked_real_images_1 =  cloth_warp_images
+    warped_masked_real_images_1 = (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+    # warped_masked_real_images_1 = (torch.ones_like(real_images_copy) * ((real_masks_copy >= 0.5) ^ (cloth_warp_masks >= 0.5))) + (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+    # warped_masked_real_images_1 =  cloth_warp_images
     #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
     if reverse_right:
         warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
-        warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+        warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images_copy], dim=-2)
     else:
         warped_masked_real_images_2 = torch.cat([warped_masked_real_images_1,extra_cond1_images], dim=-2)
-        warped_masked_real_images_2_target = torch.cat([real_images,extra_cond1_images], dim=-2)
+        warped_masked_real_images_2_target = torch.cat([real_images_copy,extra_cond1_images], dim=-2)
 
     if predict_together:
         real_images_4 = torch.cat([real_images_2, warped_masked_real_images_2_target], dim=-1)
@@ -224,9 +224,8 @@ def run_inference_2(
     if image_encoder is not None:
         image_encoder.eval()
         image_hidden_states = image_encoder(condition_images)
-        # print(image_hidden_states.shape)
-        # print("image_encoder.show_trainable_params()")
-        # image_encoder.show_trainable_params()
+    else:
+        image_hidden_states = None
 
     if do_classifier_free_guidance := (guidance_scale > 1.0):
         # uncond_real_images_2 = torch.cat([masked_real_images_1, torch.zeros_like(condition_images)], dim=-2)
@@ -273,7 +272,8 @@ def run_inference_2(
             noise_pred = unet(
                 inpainting_latent_model_input,
                 t.to(device),
-                encoder_hidden_states=image_hidden_states_final,
+                #! 如果要测试image_encoder，则需要传入image_hidden_states_final
+                encoder_hidden_states=None,
                 return_dict=False,
             )[0]
             

@@ -2,6 +2,8 @@ import argparse
 import itertools
 import math
 import os
+
+import torchvision.transforms.functional
 # 设置huggingface镜像
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import random
@@ -22,9 +24,11 @@ from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 from train_grid_extra_plus_infer import run_inference_2
 import json
-from unet_adapter import adapt_unet_with_catvton_attn
+#! 如果不想用image_encoder，则用before
+from unet_adapter_before import adapt_unet_with_catvton_attn
 import lpips
 from torchvision.transforms.functional import to_tensor
+import torchvision
 from skimage.metrics import structural_similarity as ssim
 from skimage.metrics import mean_squared_error as mse
 from skimage.color import rgb2lab
@@ -375,7 +379,7 @@ def parse_args():
         "--other_loss_type",
         type=str,
         default="lpips",
-        choices=["lpips", "mse", "ssim", "canny"],
+        choices=["lpips", "mse", "ssim", "canny","vgg"],
         help="颜色损失类型：lpips或mse"
     )
     parser.add_argument(
@@ -590,28 +594,52 @@ class DreamBoothDataset(Dataset):
         if extra_cond3_image is not None and not extra_cond3_image.mode == "RGB":
             extra_cond3_image = extra_cond3_image.convert("RGB")
         
+       # 生成随机调整参数
+        brightness=0.2
+        contrast=0.2
+        saturation=0.2
+        hue=0.1
+        self.brightness = (-brightness,brightness)
+        self.contrast = (-contrast,contrast)
+        self.saturation = (-saturation,saturation)
+        self.hue = (-hue,hue)
+
+        brightness_factor = torch.rand(1).item() * (self.brightness[1] - self.brightness[0]) + self.brightness[0]
+        contrast_factor = torch.rand(1).item() * (self.contrast[1] - self.contrast[0]) + self.contrast[0]
+        saturation_factor = torch.rand(1).item() * (self.saturation[1] - self.saturation[0]) + self.saturation[0]
+        hue_factor = torch.rand(1).item() * (self.hue[1] - self.hue[0]) + self.hue[0]
+
+        # 对需要同步变换的图像应用相同参数
+        def apply_color_jitter(img):
+            img = torchvision.transforms.functional.adjust_brightness(img, brightness_factor)
+            img = torchvision.transforms.functional.adjust_contrast(img, contrast_factor)
+            img = torchvision.transforms.functional.adjust_saturation(img, saturation_factor)
+            img = torchvision.transforms.functional.adjust_hue(img, hue_factor)
+            return img
+
+
         # 转换为tensor并规范化
-        example["real_images"] = transforms.ToTensor()(real_image)
+        example["real_images"] = transforms.ToTensor()(apply_color_jitter(real_image))
         
         example["real_masks"] = transforms.ToTensor()(real_mask)
         
         if cloth_warp_image is not None:
-            example["cloth_warp_images"] = transforms.ToTensor()(cloth_warp_image)
+            example["cloth_warp_images"] = transforms.ToTensor()(apply_color_jitter(cloth_warp_image))
         
         if cloth_warp_mask is not None:
             example["cloth_warp_masks"] = transforms.ToTensor()(cloth_warp_mask)
         
         if condition_image is not None:
-            example["condition_images"] = transforms.ToTensor()(condition_image)
+            example["condition_images"] = transforms.ToTensor()(apply_color_jitter(condition_image))
 
         if extra_cond1_image is not None:
-            example["extra_cond1_images"] = transforms.ToTensor()(extra_cond1_image)
+            example["extra_cond1_images"] = transforms.ToTensor()(apply_color_jitter(extra_cond1_image))
 
         if extra_cond2_image is not None:
-            example["extra_cond2_images"] = transforms.ToTensor()(extra_cond2_image)
+            example["extra_cond2_images"] = transforms.ToTensor()(apply_color_jitter(extra_cond2_image))
 
         if extra_cond3_image is not None:
-            example["extra_cond3_images"] = transforms.ToTensor()(extra_cond3_image)
+            example["extra_cond3_images"] = transforms.ToTensor()(apply_color_jitter(extra_cond3_image))
 
         return example
 
@@ -795,11 +823,23 @@ def main():
         project_config=project_config,
     )
 
+    weight_dtype = torch.float32
+    if args.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif args.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
     # 在初始化accelerator之后添加
     if args.other_loss_type == "lpips":
         lpips_model = lpips.LPIPS(net='vgg').to(accelerator.device)
         lpips_model.requires_grad_(False)
         lpips_model.eval()
+    elif args.other_loss_type == "vgg":
+        # --- 初始化VGG ---
+        vgg = torchvision.models.vgg16(pretrained=True).features[:16].to(device=accelerator.device, dtype=weight_dtype)
+        vgg.eval()  # 固定VGG参数
+        for param in vgg.parameters():
+            param.requires_grad = False
 
 
     # Currently, it's not possible to do gradient accumulation when training two models with accelerate.accumulate
@@ -958,11 +998,7 @@ def main():
         )
     accelerator.register_for_checkpointing(lr_scheduler)
 
-    weight_dtype = torch.float32
-    if args.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif args.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
+
 
     # Move text_encode and vae to gpu.
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1111,7 +1147,7 @@ def main():
             extra_cond1=validation_extra_cond1_image,
             extra_cond2=validation_extra_cond2_image,
             extra_cond3=validation_extra_cond3_image,
-            show_whole_image=False,
+            show_whole_image=True,
             predict_together = args.predict_together,
             reverse_right = args.reverse_right,
         )[0]
@@ -1144,13 +1180,13 @@ def main():
                 real_masks = prepare_mask_image(batch["real_masks"]).to(device=accelerator.device, dtype=weight_dtype)
                 real_masks_copy = real_masks
                 real_images, params = adaptive_crop_with_margin(
-                    real_images, real_masks, 
+                    real_images, real_masks_copy, 
                     margin_ratio=0.05, 
                     target_size=(512, 384)
                 )
 
                 real_masks, _ = adaptive_crop_with_margin(
-                    real_masks, real_masks, 
+                    real_masks, real_masks_copy, 
                     margin_ratio=0.05, 
                     target_size=(512, 384)
                 )
@@ -1161,6 +1197,7 @@ def main():
                 condition_images = prepare_image(batch["condition_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 cloth_warp_images = prepare_image(batch["cloth_warp_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 cloth_warp_masks = prepare_mask_image(batch["cloth_warp_masks"]).to(device=accelerator.device, dtype=weight_dtype)
+                
                 extra_cond1_images = prepare_image(batch["extra_cond1_images"]).to(device=accelerator.device, dtype=weight_dtype)
                 # 决定哪些样本的condition image要变成全黑
                 condition_dropout_mask = torch.rand_like(condition_images) < args.condition_image_drop_out
@@ -1175,24 +1212,26 @@ def main():
                 # 在像素空间进行拼接
                 # (B, 3, H, W)
                 real_images_2 = torch.cat([real_images, condition_images], dim=-2)
+
                 masked_real_images_1 = real_images * (real_masks < 0.5) # 保留黑色部分
                 masked_real_images_2 = torch.cat([masked_real_images_1, condition_images], dim=-2)
                 masks_2 = torch.cat([real_masks, torch.zeros_like(real_masks)], dim=-2)
                 if args.reverse_right:
-                    masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks], dim=-2)
+                    masks_2_reverse = torch.cat([torch.zeros_like(real_masks), real_masks_copy], dim=-2)
                 else:
-                    masks_2_reverse = masks_2
+                    masks_2_reverse = torch.cat([real_masks_copy, torch.zeros_like(real_masks)], dim=-2)
 
                 #! 把底图去掉试试
-                # warped_masked_real_images_1 = masked_real_images_1 + (cloth_warp_images * (cloth_warp_masks >= 0.5))
-                warped_masked_real_images_1 =  cloth_warp_images
+                # warped_masked_real_images_1 = (torch.ones_like(real_images_copy) * ((real_masks_copy >= 0.5) ^ (cloth_warp_masks >= 0.5))) + (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+                warped_masked_real_images_1 = (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+                # warped_masked_real_images_1 =  cloth_warp_images
                 #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
                 if args.reverse_right:
                     warped_masked_real_images_2 = torch.cat([extra_cond1_images,warped_masked_real_images_1], dim=-2)
-                    warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images], dim=-2)
+                    warped_masked_real_images_2_target = torch.cat([extra_cond1_images,real_images_copy], dim=-2)
                 else:
                     warped_masked_real_images_2 = torch.cat([warped_masked_real_images_1,extra_cond1_images], dim=-2)
-                    warped_masked_real_images_2_target = torch.cat([real_images,extra_cond1_images], dim=-2)
+                    warped_masked_real_images_2_target = torch.cat([real_images_copy,extra_cond1_images], dim=-2)
 
 
                 if args.predict_together:
@@ -1226,7 +1265,9 @@ def main():
                     masked_real_images_latents,
                 ], dim=1)
 
-                image_encoder_hidden_states = image_encoder(condition_images)
+                #! 如果需要测试image_encoder，则需要传入condition_images
+                # image_encoder_hidden_states = image_encoder(condition_images)
+                image_encoder_hidden_states = None
 
                 # 预测噪声残差
                 noise_pred = unet(latent_model_input, timesteps, encoder_hidden_states=image_encoder_hidden_states).sample
@@ -1260,6 +1301,32 @@ def main():
                     edge_target = canny_edge_detector(target_images)
                     other_loss = F.mse_loss(edge_generated, edge_target).mean()
                     other_loss = (other_loss * dream_weights).mean()
+                elif args.other_loss_type == "vgg":
+                    # 假设VAE输出范围是[-1,1]
+                    generated_images = vae.decode(noisy_latents / vae.config.scaling_factor, return_dict=False)[0]
+                    target_images = vae.decode(target / vae.config.scaling_factor, return_dict=False)[0]
+
+                    # --- 损失函数定义 ---
+                    def normalize_vgg_input(x):
+                        return (x + 1) / 2  # 转换到[0,1]
+
+                    def histogram_loss(fake, real, bins=50):
+                        fake = (fake + 1) / 2  # 转换到[0,1]
+                        real = (real + 1) / 2
+                        # 原有直方图计算逻辑...
+                        return loss
+
+                    # --- 计算损失 ---
+                    with torch.no_grad():  # VGG不参与梯度计算
+                        gen_vgg = vgg(normalize_vgg_input(generated_images))
+                        target_vgg = vgg(normalize_vgg_input(target_images))
+
+                    l1_loss = F.l1_loss(generated_images, target_images)
+                    perceptual_loss = F.l1_loss(gen_vgg, target_vgg)
+                    hist_loss = histogram_loss(generated_images, target_images)
+
+                    #! 权重分配（需调参）
+                    other_loss = 0.5 * l1_loss + 0.3 * perceptual_loss + 0.2 * hist_loss
                 else:
                     other_loss = 0
 
@@ -1341,7 +1408,7 @@ def main():
                             extra_cond1=validation_extra_cond1_image,
                             extra_cond2=validation_extra_cond2_image,
                             extra_cond3=validation_extra_cond3_image,
-                            show_whole_image=False,
+                            show_whole_image=True,
                             predict_together = args.predict_together,
                             reverse_right = args.reverse_right,
                         )[0]
