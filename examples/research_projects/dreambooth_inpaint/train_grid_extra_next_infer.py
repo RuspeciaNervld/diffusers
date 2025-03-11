@@ -137,6 +137,7 @@ def run_inference_2(
     cloth_warp_mask: Union[torch.Tensor, Image.Image]=None,  # cloth_warp_masks
     # 除了上面的是必须存在的，下面的根据需要拼接
     extra_cond1: Union[torch.Tensor, Image.Image]=None,  # extra_condition_images
+    extra_cond2: Union[torch.Tensor, Image.Image]=None,  # extra_condition_images
     num_inference_steps: int = 50,
     guidance_scale: float = 2.5,
     generator=None,
@@ -181,6 +182,7 @@ def run_inference_2(
     cloth_warp_masks = prepare_mask_image(cloth_warp_mask).to(device=device, dtype=weight_dtype)
 
     extra_cond1_images = prepare_image(extra_cond1).to(device=device, dtype=weight_dtype)
+    extra_cond2_images = prepare_image(extra_cond2).to(device=device, dtype=weight_dtype)
 
     # 在像素空间进行拼接
     # (B, 3, H, W)
@@ -195,7 +197,8 @@ def run_inference_2(
         masks_2_reverse = torch.cat([real_masks_copy, torch.zeros_like(real_masks)], dim=-2)
     
     #! 把底图去掉试试
-    warped_masked_real_images_1 = (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+    # warped_masked_real_images_1 = (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
+    warped_masked_real_images_1 = (extra_cond2_images * (cloth_warp_masks < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
     # warped_masked_real_images_1 = (torch.ones_like(real_images_copy) * ((real_masks_copy >= 0.5) ^ (cloth_warp_masks >= 0.5))) + (real_images_copy * (real_masks_copy < 0.5))  + (cloth_warp_images * (cloth_warp_masks >= 0.5)) 
     # warped_masked_real_images_1 =  cloth_warp_images
     #! 先尝试上面是extra_cond1_images，下面是warped_masked_real_images
@@ -217,15 +220,34 @@ def run_inference_2(
         masks_4 = torch.cat([masks_2, torch.zeros_like(masks_2)], dim=-1)
     
     # VAE编码基础输入
-    real_image_latents = compute_vae_encodings(real_images_4, vae)
-    masked_real_images_latents = compute_vae_encodings(masked_real_images_4, vae)
-    mask_latent = torch.nn.functional.interpolate(masks_4, size=real_image_latents.shape[-2:], mode="nearest")
+    # 按照dim=-1分割
+    real_images_4_1 = real_images_4.split(real_images_4.shape[-1] // 2, dim=-1)[0]
+    real_images_4_2 = real_images_4.split(real_images_4.shape[-1] // 2, dim=-1)[1]
+
+    masked_real_images_4_1 = masked_real_images_4.split(masked_real_images_4.shape[-1] // 2, dim=-1)[0]
+    masked_real_images_4_2 = masked_real_images_4.split(masked_real_images_4.shape[-1] // 2, dim=-1)[1]
+
+    masks_4_1 = masks_4.split(masks_4.shape[-1] // 2, dim=-1)[0]
+    masks_4_2 = masks_4.split(masks_4.shape[-1] // 2, dim=-1)[1]
+
+    real_image_latents_1 = compute_vae_encodings(real_images_4_1, vae)
+    real_image_latents_2 = compute_vae_encodings(real_images_4_2, vae)
+    masked_real_images_latents_1 = compute_vae_encodings(masked_real_images_4_1, vae)
+    masked_real_images_latents_2 = compute_vae_encodings(masked_real_images_4_2, vae)
+    mask_latent_1 = torch.nn.functional.interpolate(masks_4_1, size=real_image_latents_1.shape[-2:], mode="nearest")
+    mask_latent_2 = torch.nn.functional.interpolate(masks_4_2, size=real_image_latents_2.shape[-2:], mode="nearest")
+    
+    real_image_latents = torch.cat([real_image_latents_1, real_image_latents_2], dim=-1)
+    masked_real_images_latents = torch.cat([masked_real_images_latents_1, masked_real_images_latents_2], dim=-1)
+    mask_latent = torch.cat([mask_latent_1, mask_latent_2], dim=-1)
+
 
     if image_encoder is not None:
         image_encoder.eval()
         image_hidden_states = image_encoder(condition_images)
-    else:
-        image_hidden_states = None
+        # print(image_hidden_states.shape)
+        # print("image_encoder.show_trainable_params()")
+        # image_encoder.show_trainable_params()
 
     if do_classifier_free_guidance := (guidance_scale > 1.0):
         # uncond_real_images_2 = torch.cat([masked_real_images_1, torch.zeros_like(condition_images)], dim=-2)
@@ -235,8 +257,14 @@ def run_inference_2(
         uncond_masked_real_images_2 = torch.cat([masked_real_images_1, torch.full_like(condition_images, -1.0)], dim=-2)
         uncond_masked_real_images_4 = torch.cat([uncond_masked_real_images_2, torch.full_like(uncond_masked_real_images_2,-1.0)], dim=-1)
 
+        uncond_masked_real_images_4_1 = uncond_masked_real_images_4.split(uncond_masked_real_images_4.shape[-1] // 2, dim=-1)[0]
+        uncond_masked_real_images_4_2 = uncond_masked_real_images_4.split(uncond_masked_real_images_4.shape[-1] // 2, dim=-1)[1]
+
+        uncond_masked_real_images_latents_1 = compute_vae_encodings(uncond_masked_real_images_4_1, vae)
+        uncond_masked_real_images_latents_2 = compute_vae_encodings(uncond_masked_real_images_4_2, vae)
+
         # uncond_real_image_latents = compute_vae_encodings(uncond_real_images_4, vae)
-        uncond_masked_real_images_latents = compute_vae_encodings(uncond_masked_real_images_4, vae)
+        uncond_masked_real_images_latents = torch.cat([uncond_masked_real_images_latents_1, uncond_masked_real_images_latents_2], dim=-1)
 
         masked_latent_concat = torch.cat([uncond_masked_real_images_latents, masked_real_images_latents])
         mask_latent_concat = torch.cat([mask_latent] * 2)
@@ -272,8 +300,7 @@ def run_inference_2(
             noise_pred = unet(
                 inpainting_latent_model_input,
                 t.to(device),
-                #! 如果要测试image_encoder，则需要传入image_hidden_states_final
-                encoder_hidden_states=None,
+                encoder_hidden_states=image_hidden_states_final,
                 return_dict=False,
             )[0]
             
@@ -288,10 +315,13 @@ def run_inference_2(
     
     latents = 1 / vae.config.scaling_factor * latents
     image = vae.decode(latents.to(vae.device, dtype=vae.dtype)).sample
+    image_latent_left = latents.split(latents.shape[-1] // 2, dim=-1)[0]
+    image_latent_right = latents.split(latents.shape[-1] // 2, dim=-1)[1]
+    image_left = vae.decode(image_latent_left.to(vae.device, dtype=vae.dtype)).sample
     # 最终的图像，只取real_images对应的部分
     if not show_whole_image:
-        image = image.split(image.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
-        image = image.split(image.shape[-1] // 2, dim=-1)[0]  # 根据latent_append_num来分割
+        image_latent = latents.split(latents.shape[-1] // 2, dim=-1)[0]
+        image = image_latent.split(image_latent.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
         processed_images = image  # 假设处理后图像
 
         # 逆变换还原
@@ -306,10 +336,18 @@ def run_inference_2(
         image = real_images_copy * (real_masks_copy < 0.5) + restored_images * (real_masks_copy >= 0.5)
 
     image = (image / 2 + 0.5).clamp(0, 1)
+    image_left = (image_left / 2 + 0.5).clamp(0, 1)
     
     # 转换为PIL图像
     image = image.cpu().permute(0, 2, 3, 1).float().numpy()
     image = numpy_to_pil(image)
+    image_left = image_left.cpu().permute(0, 2, 3, 1).float().numpy()
+    image_left = numpy_to_pil(image_left)
+
+    # 将image_left保存到固定位置
+    image_left[0].save("image_left.png")
+    import os
+    print("image_left.png saved to\n", os.path.abspath("image_left.png") + "\n")
 
     return image
 

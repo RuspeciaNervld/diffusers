@@ -14,19 +14,21 @@ warp基础上重绘 + 使用条件图片
 
 
   --train_image_encoder \
-  --reverse_right \
-python examples/research_projects/dreambooth_inpaint/train_grid_extra_plus.py \
+python examples/research_projects/dreambooth_inpaint/train_grid_extra_next.py \
   --predict_together \
+  --reverse_right \
   --use_warp_cloth  --cloth_warp_drop_out 0.05  --use_warp_as_condition \
   --use_origin_condition\
   --condition_image_drop_out 0.05 \
-  --extra_cond1_drop_out 0.0 \
+  --extra_cond1_drop_out 0.05 \
+  --extra_cond2_drop_out 0.05 \
   --image_encoder_lora_r 64 \
   --image_encoder_lora_alpha 64 \
   --image_encoder_lora_dropout 0.0 \
   --extra_cond1 "/mnt/pub_data/vton/detail_images_2" \
+  --extra_cond2 "/mnt/pub_data/vton/densepose_images" \
   --other_loss_weight 0.5 --other_loss_type mse \
-  --train_batch_size=1 --gradient_accumulation_steps=2 --learning_rate=1e-6 --max_train_steps=16000 \
+  --train_batch_size=2 --gradient_accumulation_steps=1 --learning_rate=1e-6 --max_train_steps=16000 \
   --dream_lambda 10 \
   --validation_steps 50 \
   --save_steps 500 \
@@ -40,8 +42,8 @@ python examples/research_projects/dreambooth_inpaint/train_grid_extra_plus.py \
   --trainable_modules "attention" \
   --catvton_attn_path="/mnt/pub_data/catvton_unet_attn" \
   --pretrained_clip_model_path="/mnt/pub_data/models/finetuned_clip.pt" \
-  --pretrained_image_encoder_path="/mnt/pub_data/train_output/0311_0057 像素空间同步训练很久/step-3500/image_encoder.pt" \
-  --resume_from_checkpoint "/mnt/pub_data/train_output/0311_0057 像素空间同步训练很久/step-3500" \
+  --pretrained_image_encoder_path="/mnt/pub_data/train_output/0310_2052/step-1000/image_encoder.pt" \
+  --resume_from_checkpoint "/mnt/pub_data/train_output/0310_2052/step-1000" \
 
   --gradient_checkpointing \
   --valid_cloth_warp_image "/home/nervld/gitclone/diffusers/data/catvton/cloth_warp_images/00391_00.jpg" \

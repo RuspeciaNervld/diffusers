@@ -17,7 +17,7 @@ python examples/research_projects/dreambooth_inpaint/train_grid.py \
   --condition_image_drop_out 0.0 \
   --extra_cond1 "/mnt/pub_data/vton/detail_images_2" \
   --other_loss_weight 0.5 --other_loss_type mse \
-  --train_batch_size=4 --gradient_accumulation_steps=4 --learning_rate=1e-6 --max_train_steps=16000 \
+  --train_batch_size=2 --gradient_accumulation_steps=1 --learning_rate=1e-6 --max_train_steps=16000 \
   --dream_lambda 2 \
   --validation_steps 50 \
   --save_steps 200 \

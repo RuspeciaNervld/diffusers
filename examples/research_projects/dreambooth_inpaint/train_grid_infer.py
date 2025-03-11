@@ -309,8 +309,10 @@ def run_inference_2(
                 progress_bar.update()
 
     # 解码最终的潜变量（只取real_images对应的部分）
-    if not show_whole_image:
-        latents = latents.split(latents.shape[-2] // total_latent_num, dim=-2)[0]  # 根据latent_append_num来分割
+    # if not show_whole_image:
+    latents = latents.split(latents.shape[-2] // 2, dim=-2)[0]  # 根据latent_append_num来分割
+    latents = latents.split(latents.shape[-1] // 2, dim=-1)[0]
+    
     latents = 1 / vae.config.scaling_factor * latents
     image = vae.decode(latents.to(vae.device, dtype=vae.dtype)).sample
     image = (image / 2 + 0.5).clamp(0, 1)
