@@ -19,11 +19,11 @@ CONFIG = {
     "test_data_root" :"/home/nervld/gitclone/diffusers/data/vton_test_small",
     "pretrained_model_path": "booksforcharlie/stable-diffusion-inpainting",
     "catvton_attn_path": "/home/nervld/gitclone/diffusers/models/catvton_unet_attn",
-    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_grids/像素四宫格 同步学习 step-1000", # 有的话会覆盖catvton_attn_path
+    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_grids/小dream_无人warp_step_500", # 有的话会覆盖catvton_attn_path
     "pretrained_clip_model_path": "/home/nervld/gitclone/diffusers/models/open_clip/finetuned_clip.pt",
-    "pretrained_image_encoder_path": "/home/nervld/gitclone/diffusers/models/my_grids/像素四宫格 同步学习 step-1000/image_encoder.pt",
-    "output_dir": "/home/nervld/gitclone/diffusers/output/vton_test_small/像素四宫格_同步学习_step_1000",
-    "predict_together" : True,
+    "pretrained_image_encoder_path": "/home/nervld/gitclone/diffusers/models/my_grids/小dream_无人warp_step_500/image_encoder.pt",
+    "output_dir": "/home/nervld/gitclone/diffusers/output/vton_test_small/小dream_无人warp_step_500",
+    "predict_together" : False,
     
     # 条件控制配置
     "extra_cond1": "/home/nervld/gitclone/diffusers/data/vton_test_small/detail_images_2",

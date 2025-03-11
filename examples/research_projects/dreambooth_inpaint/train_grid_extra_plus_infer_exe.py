@@ -16,16 +16,16 @@ from image_encoder import CLIPPeftModel
 # 全局配置
 CONFIG = {
     # 模型和路径配置
-    "test_data_root" :"/home/nervld/gitclone/diffusers/data/vton_test_small",
+    "test_data_root" :"/home/nervld/gitclone/diffusers/data/vton_test_small_one",
     "pretrained_model_path": "booksforcharlie/stable-diffusion-inpainting",
     "catvton_attn_path": "/home/nervld/gitclone/diffusers/models/catvton_unet_attn",
-    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_grids/像素四宫格 同步学习 step-1000", # 有的话会覆盖catvton_attn_path
+    "my_unet_attn_path": "/home/nervld/gitclone/diffusers/models/my_grids/scale_dream10_无人warp_step_1500", # 有的话会覆盖catvton_attn_path
     "pretrained_clip_model_path": "/home/nervld/gitclone/diffusers/models/open_clip/finetuned_clip.pt",
-    "pretrained_image_encoder_path": "/home/nervld/gitclone/diffusers/models/my_grids/像素四宫格 独立学习 step-1500/image_encoder.pt",
-    "output_dir": "/home/nervld/gitclone/diffusers/output/vton_test_small/像素四宫格 独立学习 step-1500",
+    "pretrained_image_encoder_path": "/home/nervld/gitclone/diffusers/models/my_grids/scale_dream10_无人warp_step_1500/image_encoder.pt",
+    "output_dir": "/home/nervld/gitclone/diffusers/output/vton_test_small_one/scale_dream10_无人warp_step_1500",
     
     # 条件控制配置
-    "extra_cond1": "/home/nervld/gitclone/diffusers/data/vton_test_small/detail_images_2",
+    "extra_cond1": "/home/nervld/gitclone/diffusers/data/vton_test_small_one/detail_images_2",
     "extra_cond2": None,
     "extra_cond3": None,
 
@@ -182,7 +182,8 @@ def run_inference_on_test_dataset(test_data_root):
                 cloth_warp_image=cloth_warp_images,
                 cloth_warp_mask=cloth_warp_masks,
                 extra_cond1=extra_cond1,
-                show_whole_image=True,
+                show_whole_image=False,
+                guidance_scale=8.0,
             )
 
             for i in range(len(result)):
