@@ -53,7 +53,7 @@ python examples/research_projects/dreambooth_inpaint/train_grid_extra_plus.py \
 
 
 
-python examples/research_projects/dreambooth_inpaint/train_grid_extra.py \
+python examples/research_projects/dreambooth_inpaint/train_grid_extra_plus.py \
   --use_warp_cloth  --cloth_warp_drop_out 0.1  --use_warp_as_condition \
   --use_origin_condition\
   --condition_image_drop_out 0.0 \

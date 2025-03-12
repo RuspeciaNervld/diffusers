@@ -25,7 +25,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from train_grid_extra_plus_infer import run_inference_2
 import json
 #! 如果不想用image_encoder，则用before
-from unet_adapter_before import adapt_unet_with_catvton_attn
+from unet_adapter import adapt_unet_with_catvton_attn
 import lpips
 from torchvision.transforms.functional import to_tensor
 import torchvision
